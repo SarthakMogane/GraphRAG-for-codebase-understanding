@@ -24,13 +24,9 @@ class Neo4jLoader:
             user: Database user (default: from env)
             password: Database password (default: from env)
         """
-        # self.uri = uri or os.getenv('NEO4J_URI', 'bolt://localhost:7687')
-        # self.user = user or os.getenv('NEO4J_USER', 'neo4j')
-        # self.password = password or os.getenv('NEO4J_PASSWORD', 'graphrag2025')
-
-        self.uri = "bolt://127.0.0.1:7687" 
-        self.user = "neo4j"
-        self.password = "graphrag2025"
+        self.uri = uri or os.getenv('NEO4J_URI', 'bolt://localhost:7687')
+        self.user = user or os.getenv('NEO4J_USER', 'neo4j')
+        self.password = password or os.getenv('NEO4J_PASSWORD', 'graphrag2025')
         
         self.driver = None
         self._connect()
