@@ -13,6 +13,7 @@ data/processed_data.csv
 mlruns/
 
 #src
+data/
 artifacts/
 models/
 

@@ -12,7 +12,7 @@ import tree_sitter_javascript as tsjavascript
 from tree_sitter import Language, Parser, Node
 from loguru import logger
 
-from models import ParsedFile, ParsedFunction, ParsedClass
+from src.models import ParsedFile, ParsedFunction, ParsedClass
 
 # Initialize parsers
 PY_LANGUAGE = Language(tspython.language())

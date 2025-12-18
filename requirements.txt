@@ -1,48 +1,151 @@
 # Core ADK and Google AI
-google-adk>=1.18.0
-google-generativeai>=0.8.0
+google-adk>=1.19.0
+google-generativeai>=0.8.3
 
 # Graph Database
 neo4j>=5.15.0
-neo4j-driver>=5.15.0
 
 # Code Parsing
-tree-sitter>=0.20.0
-tree-sitter-python>=0.20.0
-tree-sitter-javascript>=0.20.0
-tree-sitter-java>=0.20.0
+tree-sitter>=0.21.3
+tree-sitter-python==0.21.0
+tree-sitter-javascript==0.21.0
 
-# Vector Operations
-numpy>=1.24.0
-scipy>=1.11.0
+# Data Processing
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
 
 # Git Operations
 gitpython>=3.1.40
 
-# Network Analysis
-networkx>=3.2.0
+# Scientific Computing
+numpy>=1.24.0
 
-# Data Processing
-pandas>=2.1.0
-pydantic>=2.5.0
-
-# API & Web
-fastapi>=0.104.0
-uvicorn>=0.24.0
-requests>=2.31.0
+# Logging
+loguru>=0.7.0
 
 # Utilities
 python-dotenv>=1.0.0
-loguru>=0.7.0
-tenacity>=8.2.0
-tqdm>=4.66.0
 
-# Development
+# Testing
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
-black>=23.0.0
-ruff>=0.1.0
 
-# Visualization (optional)
-plotly>=5.18.0
-graphviz>=0.20.0
+# Optional: For API server
+fastapi>=0.104.0
+uvicorn>=0.24.0
+
+# Core Dependencies
+python>=3.9
+
+# ============================================
+# PHASE 1: INDEXING
+# ============================================
+
+# Code Parsing & AST
+tree-sitter==0.20.4
+tree-sitter-python==0.20.4
+tree-sitter-javascript==0.20.4
+
+# Graph Processing
+networkx==3.2.1
+python-louvain==0.16
+igraph==0.11.3
+
+# Graph Database
+neo4j==5.14.0
+py2neo==2021.2.4
+
+# Embeddings & Vector Search
+sentence-transformers==2.2.2
+transformers==4.35.2
+torch==2.1.2
+faiss-cpu==1.7.4
+# faiss-gpu==1.7.4  # Uncomment if you have CUDA GPU
+
+# ============================================
+# PHASE 2: RETRIEVAL & LLM ORCHESTRATION
+# ============================================
+
+# LLM APIs
+openai==1.6.1
+anthropic==0.8.1
+langchain==0.1.0
+langchain-community==0.0.10
+langchain-openai==0.0.2
+
+# NLP Processing
+spacy==3.7.2
+nltk==3.8.1
+
+# ============================================
+# PHASE 3: GENERATION & VERIFICATION
+# ============================================
+
+# Scientific Computing
+numpy==1.24.4
+scipy==1.11.4
+scikit-learn==1.3.2
+
+# ============================================
+# EVALUATION
+# ============================================
+
+# Metrics
+rouge-score==0.1.2
+bert-score==0.3.13
+evaluate==0.4.1
+
+# ============================================
+# VISUALIZATION & DEMO
+# ============================================
+
+# Graph Visualization
+pyvis==0.3.2
+plotly==5.18.0
+matplotlib==3.8.2
+seaborn==0.13.0
+
+# Web Interface
+streamlit==1.29.0
+gradio==4.10.0
+
+# ============================================
+# UTILITIES
+# ============================================
+
+# Data Handling
+pandas==2.1.4
+pyyaml==6.0.1
+python-dotenv==1.0.0
+tqdm==4.66.1
+
+# File Handling
+pathlib>=1.0.1
+gitpython==3.1.40
+
+# Testing & Development
+pytest==7.4.3
+pytest-cov==4.1.0
+black==23.12.1
+flake8==7.0.0
+mypy==1.7.1
+
+# Logging
+loguru==0.7.2
+
+# ============================================
+# OPTIONAL: Advanced Features
+# ============================================
+
+# For code complexity analysis
+radon==6.0.1
+
+# For parsing multiple languages
+tree-sitter-cpp==0.20.3
+tree-sitter-java==0.20.2
+
+# For better text splitting
+tiktoken==0.5.2
+
+# For caching
+diskcache==5.6.3

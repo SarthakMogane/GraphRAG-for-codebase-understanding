@@ -1,0 +1,138 @@
+# Global Settings for Hybrid GraphRAG
+
+# Supported Languages for Code Parsing
+supported_languages:
+  - python
+  - javascript
+  - typescript
+  - java
+  - cpp
+  - go
+
+# AST Parsing Configuration
+ast_parsing:
+  ignore_patterns:
+    - "*/test/*"
+    - "*/tests/*"
+    - "*/__pycache__/*"
+    - "*/node_modules/*"
+    - "*.pyc"
+    - "*.min.js"
+  
+  node_types:
+    python:
+      - function_definition
+      - class_definition
+      - import_statement
+      - import_from_statement
+    
+    javascript:
+      - function_declaration
+      - class_declaration
+      - import_statement
+      - export_statement
+
+# Graph Building Configuration
+graph_building:
+  edge_types:
+    - CALLS
+    - IMPORTS
+    - DEFINES
+    - INHERITS
+    - USES
+    - IMPLEMENTS
+  
+  node_attributes:
+    - name
+    - type
+    - code_snippet
+    - docstring
+    - start_line
+    - end_line
+    - file_path
+    - complexity_score
+
+# Semantic Enrichment
+semantic_enrichment:
+  max_code_length: 2000  # Max chars to send to LLM
+  include_context: true
+  context_lines: 5  # Lines before/after for context
+  
+  summarization_prompt: |
+    Analyze this code entity and provide:
+    1. A concise summary (1-2 sentences)
+    2. Key functionality
+    3. Dependencies (if any)
+    4. Domain tags (e.g., authentication, database, API)
+
+# Community Detection
+community_detection:
+  algorithm: louvain
+  resolution: 1.0
+  min_community_size: 3
+  max_iterations: 100
+  
+  summarization:
+    min_entities: 5  # Min entities to summarize
+    max_tokens: 500  # Max tokens per summary
+    include_examples: true
+
+# Retrieval Configuration
+retrieval:
+  query_classification:
+    method: llm  # Options: llm, heuristic, hybrid
+    confidence_threshold: 0.7
+  
+  global_retrieval:
+    top_k_communities: 5
+    merge_summaries: true
+  
+  local_retrieval:
+    semantic_search:
+      top_k: 10
+      min_similarity: 0.65
+    
+    graph_traversal:
+      max_hops: 2
+      max_nodes: 50
+      algorithm: bfs  # Options: bfs, dfs, shortest_path
+    
+    context_pruning:
+      method: embedding_similarity  # Options: pagerank, embedding_similarity
+      keep_top_percent: 0.7
+
+# Generation Configuration
+generation:
+  max_context_tokens: 3000
+  
+  graph_formatting:
+    format: json  # Options: json, adjacency_list, natural_language
+    include_properties: true
+    max_depth: 3
+  
+  selfcheck:
+    enabled: true
+    n_samples: 5
+    temperature: 1.0
+    consistency_method: llm  # Options: llm, embedding
+    threshold: 0.5
+
+# Evaluation
+evaluation:
+  metrics:
+    - precision_at_k
+    - recall_at_k
+    - mrr
+    - rouge_l
+    - bert_score
+    - hallucination_rate
+  
+  k_values: [1, 3, 5, 10]
+
+# Performance
+performance:
+  enable_caching: true
+  cache_ttl: 3600  # seconds
+  batch_processing: true
+  batch_size: 32
+  max_parallel_requests: 4
