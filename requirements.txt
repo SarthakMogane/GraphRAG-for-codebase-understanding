@@ -34,9 +34,6 @@ pytest-asyncio>=0.21.0
 fastapi>=0.104.0
 uvicorn>=0.24.0
 
-# Core Dependencies
-python>=3.9
-
 # ============================================
 # PHASE 1: INDEXING
 # ============================================
@@ -67,11 +64,14 @@ faiss-cpu==1.7.4
 # ============================================
 
 # LLM APIs
-openai==1.6.1
-anthropic==0.8.1
-langchain==0.1.0
-langchain-community==0.0.10
-langchain-openai==0.0.2
+openai>=1.6.1
+anthropic>=0.75.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langchain-openai>=0.3.0
+langchain-google-genai>=0.0.1
+langchain-anthropic>=0.1.0
 
 # NLP Processing
 spacy==3.7.2
