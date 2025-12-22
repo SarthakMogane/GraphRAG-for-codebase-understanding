@@ -41,7 +41,7 @@ class SemanticEnricher:
     
     def __init__(self,
         llm_client: LangChainClient,
-        batch_size: int = 1,
+        batch_size: int = 10,
         skip_types: List[str] = None):
         """
         Initialize semantic enricher
@@ -60,7 +60,8 @@ class SemanticEnricher:
     def enrich_graph(
         self,
         graph: nx.DiGraph,
-        skip_existing: bool = True
+        skip_existing: bool = True,
+        save_path: str = None
     ) -> nx.DiGraph:
         """
         Enrich all nodes in graph
@@ -113,7 +114,11 @@ class SemanticEnricher:
                 except Exception as e:
                     logger.error(f"Failed to enrich {node_id}: {e}")
                     failed_count += 1
-        
+
+            if save_path:
+                import pickle
+                with open(save_path, 'wb') as f:
+                    pickle.dump(graph, f)
         logger.success(
             f"Enrichment complete: {enriched_count} enriched, {failed_count} failed"
         )
@@ -279,10 +284,23 @@ def enrich_from_pickle(
         Enriched graph
     """
     import pickle
+    import os
     
+    if output_path is None:
+        final_path = input_path.replace('.pkl', '_enriched.pkl')
+    else:
+        final_path = output_path
+    
+    if os.path.exists(final_path):
+        logger.info(f"Found existing progress at {final_path}. Resuming...")
+        load_path = final_path
+    else:
+        logger.info(f"Starting fresh from {input_path}")
+        load_path = input_path
+
     # Load graph
-    logger.info(f"Loading graph from {input_path}")
-    with open(input_path, 'rb') as f:
+    logger.info(f"Loading graph from {load_path}")
+    with open(load_path, 'rb') as f:
         graph = pickle.load(f)
     
     logger.info(f"Loaded graph: {graph.number_of_nodes()} nodes")
@@ -290,13 +308,10 @@ def enrich_from_pickle(
     # Enrich
     llm = LangChainClient(provider=llm_provider)
     enricher = SemanticEnricher(llm_client=llm)
-    enriched_graph = enricher.enrich_graph(graph)
+    enriched_graph = enricher.enrich_graph(graph,save_path=final_path)
     
     # Save
-    if output_path is None:
-        output_path = input_path.replace('.pkl', '_enriched.pkl')
-    
-    with open(output_path, 'wb') as f:
+    with open(final_path, 'wb') as f:
         pickle.dump(enriched_graph, f)
     
     logger.success(f"Enriched graph saved to {output_path}")

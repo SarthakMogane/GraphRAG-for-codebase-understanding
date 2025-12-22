@@ -23,7 +23,7 @@ class LangChainClient:
         "anthropic": ChatAnthropic
     }
 
-    def __init__(self, provider: str = "google", model_name: str = "gemini-2.5-pro"):
+    def __init__(self, provider: str = "google", model_name: str = "gemini-2.5-flash"):
         self.provider = provider
         self.model_name = model_name
         
