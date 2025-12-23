@@ -192,14 +192,14 @@ Focus on clarity and accuracy. Base your analysis only on the provided code.
         prompt = self._build_enrichment_prompt(node_id, attrs)
         prompt += "\nProvide your response as JSON."
         
-        response_text = self.llm.generate(
+        response = self.llm.generate(
             prompt=prompt
         )
         
         # Try to parse JSON from response
         try:
             # Extract JSON if wrapped in markdown
-            content = response_text
+            content = response.content
             if '```json' in content:
                 content = content.split('```json')[1].split('```')[0]
             elif '```' in content:

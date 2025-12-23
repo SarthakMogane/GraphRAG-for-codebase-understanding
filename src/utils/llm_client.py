@@ -49,7 +49,7 @@ class LangChainClient:
         }
         return keys.get(provider)
 
-    def generate(self, prompt: str, system: Optional[str] = None) -> str:
+    def generate(self, prompt: str, system: Optional[str] = None,**kwargs) -> str:
         """Standard text generation"""
         messages = []
         if system:
@@ -57,10 +57,10 @@ class LangChainClient:
         messages.append(HumanMessage(content=prompt))
 
         # Invoke the model
-        response = self.llm.invoke(messages)
+        response = self.llm.invoke(messages,**kwargs)
         
         # LangChain standardizes the content for us
-        return response.content
+        return response
 
     def generate_json(self, prompt: str, schema: Dict[str, Any]) -> Dict:
         """
