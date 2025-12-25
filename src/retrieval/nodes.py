@@ -197,66 +197,98 @@ Examples: "How does login() work?", "What does validate_email do?", "Where is X 
     # ========================================
     
     def retrieve_local(self, state: GraphState) -> Dict:
-        """
-        Retrieve relevant code using vector search + graph traversal
-        """
-        start_time = time.time()
-        logger.info("Executing local retrieval (vector + graph)")
-        
-        query = state['query']
-        top_k = state.get('top_k', 10)
-        max_hops = state.get('max_hops', 2)
-        
-        # Step 1: Vector search for anchor nodes
-        search_results = self.vector_store.search(query, top_k=top_k)
-        
-        anchor_nodes = [r.node_id for r in search_results]
-        logger.info(f"Found {len(anchor_nodes)} anchor nodes via vector search")
-        
-        # Step 2: Graph traversal from anchors
-        expanded_nodes = set(anchor_nodes)
-        
-        for anchor in anchor_nodes[:3]:  # Expand from top 3
-            # Get k-hop neighbors
-            if anchor in self.graph:
-                neighbors = self._get_k_hop_neighbors(anchor, max_hops)
-                expanded_nodes.update(neighbors)
-        
-        logger.info(f"Expanded to {len(expanded_nodes)} nodes via graph traversal")
-        
-        # Step 3: Rank and select final context
-        context_items = []
-        
-        for node_id in list(expanded_nodes)[:top_k]:
-            if node_id in self.graph.nodes:
-                attrs = self.graph.nodes[node_id]
-                
-                # Determine score (higher if from vector search)
-                score = 0.9 if node_id in anchor_nodes else 0.5
-                
-                context_item = {
-                    "node_id": node_id,
-                    "node_type": attrs.get('type', 'unknown'),
-                    "name": attrs.get('name', 'unknown'),
-                    "code": attrs.get('code', '')[:500],  # Truncate
-                    "summary": attrs.get('summary', ''),
-                    "tags": attrs.get('tags', []),
-                    "score": score,
-                    "source": "vector_search" if node_id in anchor_nodes else "graph_traversal"
-                }
-                context_items.append(context_item)
-        
-        elapsed = time.time() - start_time
-        logger.info(f"Retrieved {len(context_items)} code entities")
-        
-        return {
-            **add_step(state, "retrieve_local"),
-            "retrieval_path": "local",
-            "anchor_nodes": anchor_nodes,
-            "subgraph_nodes": list(expanded_nodes),
-            "context": context_items,
-            "timing": {**state.get("timing", {}), "retrieve_local": elapsed}
-        }
+            """
+            Retrieve relevant code using vector search + graph traversal + pruning + reranking
+            """
+            start_time = time.time()
+            logger.info("Executing local retrieval (vector + graph + optimization)")
+            
+            query = state['query']
+            top_k = state.get('top_k', 10)
+            max_hops = state.get('max_hops', 2)
+            
+            # Step 1: Query expansion (optional, for better recall)
+            if hasattr(self, 'query_expander'):
+                expanded = self.query_expander.expand(query, num_expansions=2)
+                all_queries = [query] + expanded.expansions
+            else:
+                all_queries = [query]
+            
+            # Step 2: Vector search with expanded queries
+            all_anchor_nodes = set()
+            for q in all_queries[:2]:  # Use top 2 queries
+                search_results = self.vector_store.search(q, top_k=top_k)
+                all_anchor_nodes.update([r.node_id for r in search_results])
+            
+            anchor_nodes = list(all_anchor_nodes)[:top_k]
+            logger.info(f"Found {len(anchor_nodes)} anchor nodes via vector search")
+            
+            # Step 3: Graph traversal from anchors
+            expanded_nodes = set(anchor_nodes)
+            
+            for anchor in anchor_nodes[:3]:  # Expand from top 3
+                if anchor in self.graph:
+                    neighbors = self._get_k_hop_neighbors(anchor, max_hops)
+                    expanded_nodes.update(neighbors)
+            
+            logger.info(f"Expanded to {len(expanded_nodes)} nodes via graph traversal")
+            
+            # Step 4: Prune context (NEW - Week 4)
+            if hasattr(self, 'pruner') and len(expanded_nodes) > top_k:
+                pruned = self.pruner.prune(
+                    candidate_nodes=list(expanded_nodes),
+                    query=query,
+                    target_count=top_k * 2  # Get 2x for reranking
+                )
+                selected_nodes = pruned.nodes
+                logger.info(f"Pruned to {len(selected_nodes)} nodes")
+            else:
+                selected_nodes = list(expanded_nodes)[:top_k * 2]
+            
+            # Step 5: Re-rank with cross-encoder (NEW - Week 4)
+            if hasattr(self, 'reranker'):
+                reranked = self.reranker.rerank(
+                    query=query,
+                    nodes=selected_nodes,
+                    graph=self.graph,
+                    top_k=top_k
+                )
+                final_nodes = [r.node_id for r in reranked]
+                scores_dict = {r.node_id: r.score for r in reranked}
+                logger.info(f"Re-ranked to top {len(final_nodes)} nodes")
+            else:
+                final_nodes = selected_nodes[:top_k]
+                scores_dict = {n: 0.8 for n in final_nodes}
+            
+            # Step 6: Build context items
+            context_items = []
+            for node_id in final_nodes:
+                if node_id in self.graph.nodes:
+                    attrs = self.graph.nodes[node_id]
+                    
+                    context_item = {
+                        "node_id": node_id,
+                        "node_type": attrs.get('type', 'unknown'),
+                        "name": attrs.get('name', 'unknown'),
+                        "code": attrs.get('code', '')[:500],  # Truncate
+                        "summary": attrs.get('summary', ''),
+                        "tags": attrs.get('tags', []),
+                        "score": scores_dict.get(node_id, 0.5),
+                        "source": "optimized_retrieval"
+                    }
+                    context_items.append(context_item)
+            
+            elapsed = time.time() - start_time
+            logger.info(f"Retrieved {len(context_items)} optimized entities in {elapsed:.2f}s")
+            
+            return {
+                **add_step(state, "retrieve_local_optimized"),
+                "retrieval_path": "local",
+                "anchor_nodes": anchor_nodes,
+                "subgraph_nodes": list(expanded_nodes),
+                "context": context_items,
+                "timing": {**state.get("timing", {}), "retrieve_local": elapsed}
+            }
     
     def _get_k_hop_neighbors(self, node_id: str, k: int) -> List[str]:
         """Get all nodes within k hops"""
