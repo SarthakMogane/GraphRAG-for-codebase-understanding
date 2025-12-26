@@ -26,7 +26,8 @@ def create_rag_workflow(
     vector_store: VectorStore,
     community_detector: CommunityDetector,
     llm_client: LangChainClient = None,
-    enable_verification: bool = True
+    enable_verification: bool = True,
+    enable_optimization: bool = True
 ):
     """
     Create the complete RAG workflow using LangGraph
@@ -51,6 +52,51 @@ def create_rag_workflow(
         community_detector=community_detector,
         llm_client=llm_client
     )
+
+    if enable_optimization:
+        from sentence_transformers import SentenceTransformer
+        from retrieval.context_pruner import ContextPruner
+        from retrieval.reranker import Reranker
+        from retrieval.query_expansion import QueryExpander
+        
+        logger.info("Enabling Week 4 optimizations...")
+        
+        # Load embedding model for pruning
+        embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+        
+        # Add pruner
+        nodes.pruner = ContextPruner(
+            graph=graph,
+            embedding_model=embedding_model,
+            strategy='hybrid'
+        )
+        
+        # Add reranker
+        nodes.reranker = Reranker(model_name='fast')
+        
+        # Add query expander
+        nodes.query_expander = QueryExpander(llm_client=llm_client)
+        
+        logger.info("✓ Optimizations enabled: pruning, reranking, query expansion")
+
+
+    
+    # Create the state graph
+    workflow = StateGraph(GraphState)
+    
+    # ========================================
+    # Add nodes to the graph
+    # ========================================
+    
+    workflow.add_node("classify_query", nodes.classify_query)
+    workflow.add_node("retrieve_global", nodes.retrieve_global)
+    workflow.add_node("retrieve_local", nodes.retrieve_local)
+    workflow.add_node("format_context", nodes.format_context)
+    workflow.add_node("generate_answer", nodes.generate_answer)
+    
+    if enable_verification:
+        workflow.add_node("verify_answer", nodes.verify_answer)
+
     
     # Create the state graph
     workflow = StateGraph(GraphState)
