@@ -40,7 +40,7 @@ class QueryExpander:
     4. Multi-perspective (different angles)
     """
     
-    def __init__(self, llm_client: LLMClient = None):
+    def __init__(self, llm_client: LangChainClient):
         """
         Initialize query expander
         
@@ -218,7 +218,7 @@ class QueryRewriter:
         except LookupError:
             nltk.download('stopwords')
 
-        self.stop_words = set(stopwords.words('englist'))
+        self.stop_words = set(stopwords.words('english'))
         
         code_keywords = {
             'if', 'else', 'while', 'for', 'return', 'yield', 
@@ -290,15 +290,16 @@ class QueryRewriter:
 
 # Example usage
 if __name__ == "__main__":
-    from utils.llm_client import LLMClient
+    from utils.llm_client import LangChainClient
     
     # Initialize
-    llm = LLMClient(temperature=0.7)
+    llm = LangChainClient()
     expander = QueryExpander(llm_client=llm)
     rewriter = QueryRewriter()
     
     # Test query
-    query = "How does the function that validates user email addresses work?"
+    # query = "How does the function that validates user email addresses work?"
+    query = "tell me about fetch_password_function ?"
     
     print(f"Original query: {query}\n")
     
