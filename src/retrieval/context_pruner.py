@@ -155,7 +155,7 @@ class ContextPruner:
             return {node: 0.5 for node in nodes}
         
         # Get query embedding
-        query_emb = self.embedding_model.embed_query([query])[0]
+        query_emb = self.embedding_model.encode([query])[0]
         print(query_emb)
         
         # Get node embeddings and compute similarity
@@ -170,7 +170,7 @@ class ContextPruner:
             text = f"{attrs.get('name', '')} {attrs.get('summary', '')} {attrs.get('code', '')[:200]}"
             
             # Compute similarity
-            node_emb = self.embedding_model.embed_query([text])[0]
+            node_emb = self.embedding_model.encode([text])[0]
             print(node_emb)
             similarity = np.dot(query_emb, node_emb)
             scores[node] = float(similarity)
