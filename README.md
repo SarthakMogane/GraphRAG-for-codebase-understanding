@@ -212,7 +212,7 @@ python scripts/finalize_production.py --start-api
 | Component | Technology | Version | Purpose |
 |-----------|-----------|---------|---------|
 | **Orchestration** | LangGraph | 0.2.45 | State machine workflows |
-| **LLM** Langchain|Google| OpenAI GPT-4o | 2024-11 | Generation & classification |
+| **LLM** Langchain|Google| Gemini-2.0-flash-exp | 2024-11 | Generation & classification |
 | **Embeddings** | Sentence-Transformers | 3.1.1 | Semantic vectors |
 | **Vector Store** | FAISS | 1.8.0 | Similarity search |
 | **Graph DB** | Neo4j | 5.14.0 | Graph storage (optional) |
@@ -556,7 +556,7 @@ If you use this project in your research or work, please cite:
 @software{hybrid_graphrag_2024,
   author = {Sarthak Mogane},
   title = {Hybrid GraphRAG: Intelligent Code Analysis System},
-  year = {2024},
+  year = {2025},
   url = {https://github.com/SarthakMogane/hybrid-graphrag}
 }
 ```
