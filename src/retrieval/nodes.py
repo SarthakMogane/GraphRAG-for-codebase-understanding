@@ -245,7 +245,7 @@ Examples: "How does login() work?", "What does validate_email do?", "Where is X 
             else:
                 selected_nodes = list(expanded_nodes)[:top_k * 2]
             
-            # Step 5: Re-rank with cross-encoder (NEW - Week 4)
+            # Step 5: Re-rank with cross-encoder
             if hasattr(self, 'reranker'):
                 reranked = self.reranker.rerank(
                     query=query,
