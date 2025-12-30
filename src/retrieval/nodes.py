@@ -401,21 +401,23 @@ Examples: "How does login() work?", "What does validate_email do?", "Where is X 
         
         try:
             response = self.llm.generate(
-           
-                system=system_prompt,
-                prompt=user_prompt,
+                messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
                 temperature=0.3
             )
             
-            answer = response.content
+            raw_answer = response.content
             tokens = response.usage_metadata
-            
+
             elapsed = time.time() - start_time
             logger.success(f"Answer generated ({tokens['output_tokens']} tokens)")
             
             return {
                 **add_step(state, "generate_answer"),
-                "answer": answer,
+                "answer": raw_answer,
+                "raw_answer":raw_answer,
                 "tokens_used": {**state.get("tokens_used", {}), "generation": tokens},
                 "timing": {**state.get("timing", {}), "generate": elapsed}
             }
@@ -434,34 +436,138 @@ Examples: "How does login() work?", "What does validate_email do?", "Where is X 
     
     def verify_answer(self, state: GraphState) -> Dict:
         """
-        Verify answer for hallucinations (simplified SelfCheckGPT)
+        Verify answer for hallucinations using COMPLETE SelfCheckGPT
+        
+        Method:
+        1. Generate N alternative samples with high temperature
+        2. Check each sentence against samples
+        3. Score consistency
+        4. Flag low-confidence claims
         """
         if not state.get('verification_enabled', False):
             logger.info("Verification disabled, skipping")
             return {
                 **add_step(state, "verification_skipped"),
+                "verified": True,
+                "consistency_scores": [1.0]
+            }
+        
+        
+        start_time = time.time()
+        logger.info("Running FULL SelfCheckGPT verification")
+        
+        # Import verification module
+        from generation.selfcheck_verifier import SelfCheckGPT , CitationExtractor
+        
+        answer_to_verify = state.get('raw_answer', state.get('answer',''))
+        context = state.get('formatted_context', '')
+        query = state.get('query', '')
+        context_items = state.get('context', [])
+        
+        if not answer_to_verify or not context:
+            logger.warning("Missing answer or context for verification")
+            return {
+                **add_step(state, "verification_skipped"),
                 "verified": True
             }
         
-        logger.info("Verifying answer (simplified check)")
+
+        try:
+            # Initialize SelfCheckGPT
+            verifier = SelfCheckGPT(
+                llm_client=self.llm,
+                n_samples=5,  # Generate 5 alternative answers
+                temperature=1.0,  # High temperature for diversity
+                consistency_threshold=0.5
+            )
+            
+            # Run verification
+            verifications = verifier.verify(query, context, answer_to_verify)
+            #applying Trafic Light formating 
+            formatted_answer = verifier.format_verified_answer(
+                answer_to_verify, 
+                verifications, 
+                include_scores=False # Set True if you want (Score: 0.4) in text
+            )
+            # Extract results
+            consistency_scores = [v.consistency_score for v in verifications]
+            hallucination_flags = [v.is_hallucination for v in verifications]
+            
+            # Calculate overall verification status
+            hallucination_rate = sum(hallucination_flags) / len(hallucination_flags) if hallucination_flags else 0
+            verified = hallucination_rate < 0.3  # Less than 30% flagged
+            
+            # Get summary
+            summary = verifier.get_verification_summary(verifications)
+            
+            current_answer_string = formatted_answer
+
+
+            try:
+                logger.info("Adding citations")
+                from generation.selfcheck_verifier import CitationExtractor
+                
+                extractor = CitationExtractor(self.graph)
+                
+                # Which nodes can we cite? (Only ones LLM actually saw)
+                context_node_ids = [item['node_id'] for item in context_items]
+                
+                # Find citations in the CURRENT string (which might have checkmarks now)
+                citations = extractor.extract_citations(current_answer_string, context_node_ids)
+                
+                # Add brackets: "✓ Sentence [Node]"
+                final_polished_answer = extractor.format_with_citations(current_answer_string, citations, self.graph)
+                
+            except Exception as e:
+                logger.warning(f"Citation failed: {e}")
+                final_polished_answer = current_answer_string
+
+            elapsed = time.time() - start_time
+            
+            logger.info(f"Verification complete: {sum(hallucination_flags)}/{len(verifications)} "
+                        f"sentences flagged ({hallucination_rate:.1%})")
+            
+            return {
+                **add_step(state, "verify_answer_complete"),
+                "verified": verified,
+                "answer": final_polished_answer,
+                "original_answer": answer_to_verify,
+                "consistency_scores": consistency_scores,
+                "hallucination_flags": hallucination_flags,
+                "verification_samples": len(verifications),
+                "hallucination_rate": hallucination_rate,
+                "timing": {**state.get("timing", {}), "verify": elapsed}
+            }
         
-        # Simplified verification: check if answer references context
+        except Exception as e:
+            logger.error(f"SelfCheckGPT verification failed: {e}")
+            # Fallback to simple verification
+            return self._verify_answer_fallback(state)
+    
+    def _verify_answer_fallback(self, state: GraphState) -> Dict:
+        """
+        Fallback verification when SelfCheckGPT fails
+        Simple heuristic: check if answer references context entities
+        """
+        logger.info("Using fallback verification")
+        
         answer = state.get('answer', '')
         context_items = state.get('context', [])
         
-        # Simple heuristic: does answer mention entities from context?
+        # Check entity mentions
         entity_names = [item['name'] for item in context_items]
         mentions = sum(1 for name in entity_names if name.lower() in answer.lower())
         
         grounded_ratio = mentions / max(len(entity_names), 1)
-        verified = grounded_ratio > 0.2  # At least 20% of entities mentioned
+        verified = grounded_ratio > 0.2
         
-        logger.info(f"Verification: {mentions}/{len(entity_names)} entities mentioned")
+        logger.info(f"Fallback verification: {mentions}/{len(entity_names)} entities mentioned")
         
         return {
-            **add_step(state, "verify_answer"),
+            **add_step(state, "verify_answer_fallback"),
             "verified": verified,
-            "consistency_scores": [grounded_ratio]
+            "consistency_scores": [grounded_ratio],
+            "hallucination_flags": [not verified]
         }
 
 

@@ -50,9 +50,11 @@ class GraphState(TypedDict):
     
     # Verification (SelfCheckGPT)
     verification_enabled: bool  # Whether to verify
-    verification_samples: Optional[List[str]]  # Alternative answers
-    consistency_scores: Optional[List[float]]  # Per-sentence scores
+    verification_samples: Optional[List[str]]  # N alternative answers generated
+    consistency_scores: Optional[List[float]]  # Per-sentence scores (0-1)
     hallucination_flags: Optional[List[bool]]  # Flagged sentences
+    hallucination_rate: Optional[float]  # Overall rate (0-1)
+    verification_samples_count: Optional[int]  # Number of samples generated
     verified: Optional[bool]  # Overall verification result
     
     # Metadata
