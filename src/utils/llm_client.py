@@ -1,5 +1,5 @@
 import os
-from typing import Dict, Any, Optional ,List
+from typing import Dict, Any, Optional ,List ,Iterator
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
@@ -92,29 +92,70 @@ class LangChainClient:
         """
         final_llm = self.llm
 
-
-        # Google requires parameters like 'temperature' to be inside 'generation_config'
-        # if self.provider == "google" and kwargs:
-        #     gen_config = {}
-            
-        #     # Move known parameters into the config dict
-        #     if "temperature" in kwargs:
-        #         gen_config["temperature"] = kwargs.pop("temperature")
-        #     if "max_tokens" in kwargs:
-        #         gen_config["max_output_tokens"] = kwargs.pop("max_tokens")
-        #     if "top_p" in kwargs:
-        #         gen_config["top_p"] = kwargs.pop("top_p")
-            
-        #     # Bind the config dictionary instead of raw args
-        #     if gen_config:
-        #         final_llm = self.llm.bind(generation_config=gen_config)
-
         if kwargs:
             final_llm = self.llm.bind(**kwargs)
         # .with_structured_output() forces the LLM to return valid JSON matching your schema
         structured_llm = final_llm.with_structured_output(schema)
         
         return structured_llm.invoke(prompt)
+
+
+    def stream_generate(
+        self, 
+        prompt: str = None, 
+        system: Optional[str] = None, 
+        messages: Optional[List[Dict[str, str]]] = None, 
+        **kwargs
+    ) -> Iterator[str]:
+        """
+        Stream response token by token.
+        Yields strings (not full objects) for easy consumption.
+        """
+        # 1. INPUT STANDARDIZATION (Same logic as generate)
+        langchain_msgs: List[BaseMessage] = []
+
+        if messages:
+            for msg in messages:
+                role = msg.get('role')
+                content = msg.get('content')
+                if role == 'system':
+                    langchain_msgs.append(SystemMessage(content=content))
+                elif role == 'user':
+                    langchain_msgs.append(HumanMessage(content=content))
+                elif role == 'assistant':
+                    langchain_msgs.append(AIMessage(content=content))
+        elif prompt:
+            if system:
+                langchain_msgs.append(SystemMessage(content=system))
+            langchain_msgs.append(HumanMessage(content=prompt))
+        else:
+            raise ValueError("stream_generate() requires either 'prompt' or 'messages'")
+
+        # 2. DYNAMIC CONFIGURATION (Same logic as generate)
+        final_llm = self.llm
+        
+        # Google Fix
+        if self.provider == "google" and kwargs:
+            gen_config = {}
+            if "temperature" in kwargs:
+                gen_config["temperature"] = kwargs.pop("temperature")
+            if "max_tokens" in kwargs:
+                gen_config["max_output_tokens"] = kwargs.pop("max_tokens")
+            if "top_p" in kwargs:
+                gen_config["top_p"] = kwargs.pop("top_p")
+            
+            if gen_config:
+                final_llm = self.llm.bind(generation_config=gen_config)
+        
+        # OpenAI Fix
+        elif kwargs:
+            final_llm = self.llm.bind(**kwargs)
+
+        # 3. STREAMING EXECUTION
+        # distinct from .invoke(), .stream() yields chunks as they arrive
+        for chunk in final_llm.stream(langchain_msgs):
+            if chunk.content:
+                yield chunk.content
 
     def get_stats(self, response) -> Dict:
         """
