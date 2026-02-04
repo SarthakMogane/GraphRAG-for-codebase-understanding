@@ -1,6 +1,6 @@
 import os
 from typing import Dict, Any, Optional ,List ,Iterator
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import ChatGoogleGenerativeAI,HarmBlockThreshold, HarmCategory
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage ,BaseMessage ,AIMessage
@@ -23,15 +23,25 @@ class LangChainClient:
         "anthropic": ChatAnthropic
     }
 
-    def __init__(self, provider: str = "google", model_name: str = "gemini-2.5-flash",temperature: float = 0.0):
+    def __init__(self, provider: str = "google", model_name: str = "gemini-2.5-flash", temperature: float = 0.0):
         self.provider = provider
         self.model_name = model_name
-        self.temperature = temperature
+        self.temperature = temperature  
+        print("self.temperature is : " , self.temperature)
         
         # Factory pattern to pick the right class
         model_class = self.PROVIDER_MAP.get(provider)
         if not model_class:
             raise ValueError(f"Unsupported provider: {provider}")
+
+        kwargs = {}
+        if provider == "google":
+            kwargs["safety_settings"] = {
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            }
 
         # Initialize the model
         # max_retries is built-in! No need for 'tenacity' decorators.
@@ -39,7 +49,9 @@ class LangChainClient:
             model=model_name,
             max_retries=3,
             api_key=self._get_api_key(provider),
-            temperature=temperature
+            temperature=temperature,
+            streaming = True,
+            **kwargs
         )
 
     def _get_api_key(self, provider: str) -> str:
@@ -51,41 +63,79 @@ class LangChainClient:
         }
         return keys.get(provider)
 
-    def generate(self, prompt: str = None,
-                  system: Optional[str] = None,
-                 messages: Optional[list[dict[str ,str]]]= None ,
-                 **kwargs) -> str:
-        """Standard text generation"""
-
-        langchain_msg:List[BaseMessage] =[]
+    def _prepare_messages(self, prompt: str = None, system: Optional[str] = None, messages: Optional[List[Dict[str, str]]] = None) -> List[BaseMessage]:
+        """Unified message preparation logic."""
+        langchain_msgs: List[BaseMessage] = []
         if messages:
             for msg in messages:
                 role = msg.get('role')
                 content = msg.get('content')
                 if role == "system":
-                    langchain_msg.append(SystemMessage(content=content))
+                    langchain_msgs.append(SystemMessage(content=content))
                 elif role == "user":
-                    langchain_msg.append(HumanMessage(content=content))
+                    langchain_msgs.append(HumanMessage(content=content))
                 elif role == "assistant":
-                    langchain_msg.append(AIMessage(cotent =content))
-        elif prompt :
+                    langchain_msgs.append(AIMessage(content=content))
+        elif prompt:
             if system:
-                langchain_msg.append(SystemMessage(content=system))
-            langchain_msg.append(HumanMessage(content=prompt))
-
+                langchain_msgs.append(SystemMessage(content=system))
+            langchain_msgs.append(HumanMessage(content=prompt))
         else:
-            raise ValueError("generate() requires either 'prompt' or 'messages'")
+            raise ValueError("Requires either 'prompt' or 'messages'")
+        return langchain_msgs
+
+    async def generate(self, prompt: str = None,
+                  system: Optional[str] = None,
+                 messages: Optional[List[Dict[str, str]]] = None,
+                 **kwargs) -> str:
+        """Standard text generation"""
+        langchain_msgs = self._prepare_messages(prompt, system, messages)
         
-        # Invoke the model
         final_llm = self.llm
         if self.temperature is not None:
             final_llm = self.llm.bind(temperature=self.temperature)
-        response = final_llm.invoke(messages,**kwargs)
-        
-        # LangChain standardizes the content for us
-        return response
+            
+        response = await final_llm.ainvoke(langchain_msgs, **kwargs)
+        return response.content
 
-    def generate_json(self, prompt: str, schema: Dict[str, Any],**kwargs) -> Dict:
+
+    async def ainvoke(self, prompt: str = None,
+                system: Optional[str] = None,
+                messages: Optional[List[Dict[str, str]]] = None,
+                config: Optional[Dict] = None,
+                temperature=None,
+                 **kwargs)-> Any:
+        
+        """
+        Standard Async Invoke (used inside nodes).
+        LangGraph's astream_events will capture the stream from this automatically.
+        """
+        executable_model = self.model
+        if temperature is not None:
+            # .bind() creates a COPY of the configuration for just this call
+            # This is thread-safe and efficient.
+            executable_model = self.model.bind(temperature=temperature)
+            #As soon as this await finishes, the executable_model variable is thrown away by Python's garbage collector.
+            #so it never touch the base model configs
+
+        langchain_msgs = self._prepare_messages(prompt, system, messages)
+        
+        try:
+            return await executable_model.ainvoke(
+                langchain_msgs, 
+                config=config, 
+                **kwargs
+            )
+        except Exception as e:
+            # Add robust error handling/logging here
+            raise e
+        
+        # async for chunk in final_llm.astream(langchain_msgs, **kwargs):
+        #     if chunk.content:
+        #         yield chunk.content
+
+        # return await final_llm.ainvoke(langchain_msgs, config=config)
+    async def generate_json(self, prompt: str, schema: Dict[str, Any],**kwargs) -> Dict:
         """
         Structured Output (The Killer Feature)
         LangChain handles the "json_schema" vs "function_calling" logic for you.
@@ -97,7 +147,7 @@ class LangChainClient:
         # .with_structured_output() forces the LLM to return valid JSON matching your schema
         structured_llm = final_llm.with_structured_output(schema)
         
-        return structured_llm.invoke(prompt)
+        return await structured_llm.ainvoke(prompt)
 
 
     def stream_generate(
@@ -111,27 +161,9 @@ class LangChainClient:
         Stream response token by token.
         Yields strings (not full objects) for easy consumption.
         """
-        # 1. INPUT STANDARDIZATION (Same logic as generate)
-        langchain_msgs: List[BaseMessage] = []
+        langchain_msgs = self._prepare_messages(prompt, system, messages)
 
-        if messages:
-            for msg in messages:
-                role = msg.get('role')
-                content = msg.get('content')
-                if role == 'system':
-                    langchain_msgs.append(SystemMessage(content=content))
-                elif role == 'user':
-                    langchain_msgs.append(HumanMessage(content=content))
-                elif role == 'assistant':
-                    langchain_msgs.append(AIMessage(content=content))
-        elif prompt:
-            if system:
-                langchain_msgs.append(SystemMessage(content=system))
-            langchain_msgs.append(HumanMessage(content=prompt))
-        else:
-            raise ValueError("stream_generate() requires either 'prompt' or 'messages'")
-
-        # 2. DYNAMIC CONFIGURATION (Same logic as generate)
+        # 2. DYNAMIC CONFIGURATION
         final_llm = self.llm
         
         # Google Fix
@@ -152,7 +184,6 @@ class LangChainClient:
             final_llm = self.llm.bind(**kwargs)
 
         # 3. STREAMING EXECUTION
-        # distinct from .invoke(), .stream() yields chunks as they arrive
         for chunk in final_llm.stream(langchain_msgs):
             if chunk.content:
                 yield chunk.content
@@ -165,30 +196,35 @@ class LangChainClient:
             return response.response_metadata.get('token_usage', {})
         return {}
 
+
 # --- Usage Example ---
 if __name__ == "__main__":
-    # 1. Initialize
-    client = LangChainClient(provider="google", model_name="gemini-2.0-flash-exp")
+    import asyncio
+    
+    async def test():
+        # 1. Initialize
+        client = LangChainClient(provider="google", model_name="gemini-2.0-flash-exp")
 
-    # 2. Generate Text
-    print("--- Text Response ---")
-    print(client.generate("Explain GraphRAG in one sentence."))
+        # 2. Generate Text
+        print("--- Text Response ---")
+        response = await client.generate("Explain GraphRAG in one sentence.")
+        print(response)
 
-    # 3. Generate JSON (Structured)
-    # Define a simple schema (Pydantic style or raw dict)
-    schema = {
-        "title": "ProgrammingLanguages",
-        "description": "A list of programming languages",
-        "type": "object",
-        "properties": {
-            "languages": {
-                "type": "array",
-                "items": {"type": "string"}
+        # 3. Generate JSON (Structured)
+        schema = {
+            "title": "ProgrammingLanguages",
+            "description": "A list of programming languages",
+            "type": "object",
+            "properties": {
+                "languages": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
             }
         }
-    }
-    
-    print("\n--- JSON Response ---")
-    # This returns a real Python Dict, not a string you have to json.loads()!
-    result = client.generate_json("List 3 major AI programming languages", schema)
-    print(result)
+        
+        print("\n--- JSON Response ---")
+        result = client.generate_json("List 3 major AI programming languages", schema)
+        print(result)
+
+    asyncio.run(test())
