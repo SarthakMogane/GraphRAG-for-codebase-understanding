@@ -110,11 +110,11 @@ class LangChainClient:
         Standard Async Invoke (used inside nodes).
         LangGraph's astream_events will capture the stream from this automatically.
         """
-        executable_model = self.model
+        executable_model = self.llm
         if temperature is not None:
             # .bind() creates a COPY of the configuration for just this call
             # This is thread-safe and efficient.
-            executable_model = self.model.bind(temperature=temperature)
+            executable_model = self.llm.bind(temperature=temperature)
             #As soon as this await finishes, the executable_model variable is thrown away by Python's garbage collector.
             #so it never touch the base model configs
 
