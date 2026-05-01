@@ -82,7 +82,7 @@ async def auth_github_callback(request: Request):
 
         
 
-        # Step 3: The DagsHub Permission Handoff
+        # Step 3:
         # Once we know who they are, we need them to install our GitHub App 
         # on their repositories so we can read their code in the background.
         installations_resp = await oauth.github.get('user/installations', token=token_data)
