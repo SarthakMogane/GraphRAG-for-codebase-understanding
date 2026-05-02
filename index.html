@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GraphRAG Portfolio App</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; line-height: 1.6; }
+        .hidden { display: none; }
+        .card { border: 1px solid #ddd; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .repo-btn { display: block; width: 100%; text-align: left; padding: 10px; margin: 5px 0; background: #f8f9fa; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; }
+        .repo-btn:hover { background: #e9ecef; }
+        input[type="text"], input[type="password"] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;}
+        button.primary { background: #2ea44f; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold;}
+        button.primary:hover { background: #2c974b; }
+        #chat-box { height: 300px; overflow-y: scroll; border: 1px solid #ddd; padding: 10px; margin-bottom: 10px; border-radius: 4px; background: #fafafa;}
+        .msg { margin-bottom: 10px; padding: 8px; border-radius: 4px; }
+        .user-msg { background: #e3f2fd; text-align: right; }
+        .ai-msg { background: #f1f8e9; }
+        .spinner { display: inline-block; width: 20px; height: 20px; border: 3px solid rgba(0,0,0,.3); border-radius: 50%; border-top-color: #000; animation: spin 1s ease-in-out infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+
+    </head>
+<body>
+
+    <h1>🧠 GraphRAG Code Assistant</h1>
+    
+    <div id="login-section" class="card hidden">
+        <h2>Welcome to the demo</h2>
+        <p>Login with GitHub to select a repository you want to analyze.</p>
+        <!-- <button class="primary" onclick="window.location.href='http://127.0.0.1:8000/auth/login'">Login with GitHub</button> -->
+         <button class="primary" onclick="window.location.href='/auth/login'">Login with GitHub</button>
+        
+    </div>
+
+    <div id="setup-section" class="card hidden">
+        <h2>Welcome, <span id="user-name"></span>!</h2>
+        <!-- <a href="/logout" style="float: right; color: red;">Logout</a> -->
+        <a href="#" onclick="frontendLogout()" style="float: right; color: red;">Logout</a>
+        
+        <h3>1. Enter your OpenAI Key</h3>
+        <input type="password" id="openai-key" placeholder="sk-proj-..." required>
+        
+        <h3>2. Select a Repository to Ingest</h3>
+        <div id="repo-list">Loading your repositories...</div>
+    </div>
+
+
+    <div id="loading-section" class="card hidden" style="text-align: center;">
+        <h2><div class="spinner"></div> Building Knowledge Graph...</h2>
+        <p id="loading-status">Cloning repository and extracting entities. This may take a few minutes.</p>
+    </div>
+
+    <div id="chat-section" class="card hidden">
+        <h2>Chat with your Repo</h2>
+        <div id="chat-box"></div>
+        <div style="display: flex; gap: 10px;">
+            <input type="text" id="chat-input" placeholder="Ask a question about the codebase...">
+            <button class="primary" onclick="sendMessage()">Send</button>
+        </div>
+    </div>
+
+<!-- Add this new card right below your setup-section -->
+    <div id="connect-section" class="card hidden" style="text-align: center;">
+        <h2>Connect your Code</h2>
+        <p>To analyze your codebase, you need to grant the GraphRAG engine read-access to your repositories.</p>
+        <button class="primary" onclick="window.location.href='/auth/install'">Connect GitHub Repositories</button>
+    </div>
+
+<script>
+    window.onload = async () => {
+        try {
+            // const res = await fetch('http:127.0.0.1:8000/auth/status', { credentials: 'include' });
+            const res = await fetch('/auth/status', { credentials: 'include' });
+            if (res.ok) {
+                const data = await res.json();
+                document.getElementById('login-section').classList.add('hidden');
+                document.getElementById('user-name').innerText = data.username;
+                
+                // THE NEW UX LOGIC
+                if (data.is_installed) {
+                    // They installed it! Show the repos.
+                    document.getElementById('setup-section').classList.remove('hidden');
+                    fetchRepos();
+                } else {
+                    // Logged in, but haven't connected repos yet.
+                    document.getElementById('connect-section').classList.remove('hidden');
+                    document.getElementById('setup-section').classList.remove('hidden');
+                    // Hide the repo list area since it's empty
+                    document.getElementById('repo-list').innerHTML = "<em>Please connect GitHub to see repositories.</em>";
+                }
+            } else {
+                document.getElementById('login-section').classList.remove('hidden');
+            }
+        } catch (e) {
+            document.getElementById('login-section').classList.remove('hidden');
+        }
+    };
+    
+
+    // 2. The API calls are now cleaner (No more 'Authorization' headers!)
+    async function fetchRepos() {
+        try {
+            const res = await fetch('/api/repos'); // The browser auto-attaches the cookie!
+            if (res.status === 401) { return frontendLogout(); }
+            
+            const repos = await res.json();
+            const repoListDiv = document.getElementById('repo-list');
+            repoListDiv.innerHTML = ''; 
+            
+            repos.forEach(repo => {
+                const btn = document.createElement('button');
+                btn.className = 'repo-btn';
+                btn.innerHTML = `<strong>${repo.name}</strong> ${repo.private ? '🔒' : '🌍'}`;
+                btn.onclick = () => startIngestion(repo.url);
+                repoListDiv.appendChild(btn);
+            });
+        } catch (err) {
+            document.getElementById('repo-list').innerText = "Failed to load repos.";
+        }
+    }
+
+    async function startIngestion(repoUrl) {
+        const apiKey = document.getElementById('openai-key').value;
+        if (!apiKey) { alert('Please enter your OpenAI API key first.'); return; }
+
+        document.getElementById('setup-section').classList.add('hidden');
+        document.getElementById('loading-section').classList.remove('hidden');
+
+        const res = await fetch('/api/ingest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }, // No Bearer token needed
+            body: JSON.stringify({ repo_url: repoUrl, openai_api_key: apiKey })
+        });
+        
+        if (res.status === 401) { return frontendLogout(); }
+        
+        const data = await res.json();
+        currentTaskId = data.task_id;
+        pollStatus();
+    }
+
+    // 3. Frontend Logout Flow
+    async function frontendLogout() {
+        await fetch('/auth/logout', { method: 'POST' });
+        window.location.reload(); 
+    }
+
+    async function pollStatus() {
+        const res = await fetch(`/api/status/${currentTaskId}`); // Status is public, no token needed
+        const data = await res.json();
+        
+        if (data.status === 'completed') {
+            document.getElementById('loading-section').classList.add('hidden');
+            document.getElementById('chat-section').classList.remove('hidden');
+            appendMessage("System", "Knowledge graph built successfully. You can now chat with your code!", "ai-msg");
+        } else if (data.status.startsWith('failed')) {
+            document.getElementById('loading-status').innerHTML = `<span style="color:red;">Error: ${data.status}</span>`;
+        } else {
+            setTimeout(pollStatus, 2000);
+        }
+    }
+
+    async function sendMessage() {
+        const input = document.getElementById('chat-input');
+        const message = input.value.trim();
+        if (!message) return;
+
+        appendMessage("You", message, "user-msg");
+        input.value = '';
+
+        const aiMsgDiv = appendMessage("AI", "", "ai-msg");
+
+        try {
+            const res = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ task_id: currentTaskId, message: message })
+            });
+
+            if (res.status === 401) { logout(); return; }
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                
+                const chunk = decoder.decode(value);
+                const lines = chunk.split('\n');
+                for (let line of lines) {
+                    if (line.startsWith('data: ')) {
+                        let text = line.replace('data: ', '');
+                        aiMsgDiv.innerHTML += text;
+                        scrollToBottom();
+                    }
+                }
+            }
+        } catch (err) {
+            aiMsgDiv.innerHTML += "<br><span style='color:red;'>Connection lost.</span>";
+        }
+    }
+
+    function appendMessage(sender, text, className) {
+        const box = document.getElementById('chat-box');
+        const msgDiv = document.createElement('div');
+        msgDiv.className = `msg ${className}`;
+        msgDiv.innerHTML = `<strong>${sender}:</strong> <span>${text}</span>`;
+        box.appendChild(msgDiv);
+        scrollToBottom();
+        return msgDiv.querySelector('span'); 
+    }
+
+    function scrollToBottom() {
+        const box = document.getElementById('chat-box');
+        box.scrollTop = box.scrollHeight;
+    }
+</script>
+
+</body>
+</html>
