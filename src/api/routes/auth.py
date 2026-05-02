@@ -2,15 +2,12 @@ from src.db.mock_db import MOCK_DB
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import RedirectResponse,JSONResponse
 from authlib.integrations.starlette_client import OAuth
-
-# Assuming you have a config file like this
 from src.core.config import get_settings 
 
 settings = get_settings()
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 # ── Authlib Setup ─────────────────────────────────────────────────────────────
-# We register Authlib here exclusively for the human login flow.
 oauth = OAuth()
 oauth.register(
     name='github',
@@ -19,7 +16,6 @@ oauth.register(
     access_token_url='https://github.com/login/oauth/access_token',
     authorize_url='https://github.com/login/oauth/authorize',
     api_base_url='https://api.github.com/',
-    # 'user:email' scope allows us to read their primary email to create an account
     client_kwargs={'scope': 'user:email'}, 
 )
 
@@ -28,10 +24,8 @@ oauth.register(
 @router.get("/login")
 async def login_via_github(request: Request):
     """
-    Step 1: The user clicks "Login" on your frontend.
-    This endpoint instantly redirects them to GitHub's authorization page.
+    This endpoint instantly redirects user to GitHub's authorization page.
     """
-    # This must match the Callback URL exactly as typed in your GitHub App settings
     redirect_uri = request.url_for('auth_github_callback')
     
     return await oauth.github.authorize_redirect(request, redirect_uri)
@@ -40,18 +34,16 @@ async def login_via_github(request: Request):
 @router.get("/github/callback", name="auth_github_callback")
 async def auth_github_callback(request: Request):
     """
-    Step 2: GitHub sends the user back here with a temporary 'code'.
+    GitHub sends the user back here with a temporary 'code'.
     We exchange it for a token and fetch their identity.
     """
     try:
-        # Authlib automatically handles exchanging the code for the access token
         token_data = await oauth.github.authorize_access_token(request)
         user_oauth_token = token_data.get('access_token')
         
         if not user_oauth_token:
             raise HTTPException(status_code=400, detail="Failed to retrieve access token")
 
-        # Fetch the user's basic profile details from GitHub
         resp = await oauth.github.get('user', token=token_data)
         resp.raise_for_status()
         github_user = resp.json()
@@ -81,15 +73,10 @@ async def auth_github_callback(request: Request):
         print(f"[DB MOCK] Saved User: {github_user['login']}")
 
         
-
-        # Step 3:
-        # Once we know who they are, we need them to install our GitHub App 
-        # on their repositories so we can read their code in the background.
         installations_resp = await oauth.github.get('user/installations', token=token_data)
         installations_resp.raise_for_status()
         install_data = installations_resp.json()
         
-        # I noticed your actual app name in the URL you pasted!
         app_slug = "repobeacon" 
         
         # Look through their installed apps to find ours
@@ -103,7 +90,6 @@ async def auth_github_callback(request: Request):
             MOCK_DB["installations"][github_id] = existing_install['id']
             print(f"[DB MOCK] Recovered existing installation ID: {existing_install['id']}")
             
-            # Skip the install screen and go straight home # 
             #  RedirectResponse(url="http://127.0.0.1:5500/index.html",status_code= 302)
         response = RedirectResponse(url="/", status_code=302)
         response.set_cookie(
@@ -114,9 +100,6 @@ async def auth_github_callback(request: Request):
             max_age=86400             # Expiration: 1 day
         )
         return response
-       
-        return RedirectResponse(url="/",status_code=302)
-    
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Authentication failed: {str(e)}")
@@ -157,12 +140,11 @@ async def get_auth_status(request: Request):
 async def redirect_to_github_install(request: Request):
     """The frontend calls this when the user actively clicks 'Connect GitHub'"""
     # github_id = request.session.get("github_id")
-    """The frontend calls this when the user actively clicks 'Connect GitHub'"""
     github_id = request.cookies.get("auth_user_id")
     if not github_id:
         return RedirectResponse(url="http://127.0.0.1:5500/index.html")
         
-    app_slug = "repobecaon-app" # Your app name
+    app_slug = "repobeacon"
     install_url = f"https://github.com/apps/{app_slug}/installations/new?state={github_id}"
     
     return RedirectResponse(url=install_url)
