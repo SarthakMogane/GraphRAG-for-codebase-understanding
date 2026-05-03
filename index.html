@@ -71,7 +71,7 @@
 <script>
     window.onload = async () => {
         try {
-            // const res = await fetch('http:127.0.0.1:8000/auth/status', { credentials: 'include' });
+            // const res = await fetch('http:127.0.0.1:8000/auth/status', { credentials: 'include' }); 
             const res = await fetch('/auth/status', { credentials: 'include' });
             if (res.ok) {
                 const data = await res.json();
