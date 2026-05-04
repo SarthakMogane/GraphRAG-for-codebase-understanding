@@ -21,21 +21,6 @@ oauth.register(
     client_kwargs={'scope': 'user:email'}, 
 )
 
-
-# import hashlib
-# import base64
-# import secrets
-
-# # 1. The Verifier (High entropy random string)
-# code_verifier = secrets.token_urlsafe(32) 
-
-# # 2. The Challenge (SHA256 -> Base64URL -> 43 chars)
-# code_challenge_hash = hashlib.sha256(code_verifier.encode('ascii')).digest()
-# code_challenge = base64.urlsafe_b64encode(code_challenge_hash).decode('utf-8').replace('=', '')
-
-# # Result: code_challenge will be exactly 43 characters
-
-
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/login")
