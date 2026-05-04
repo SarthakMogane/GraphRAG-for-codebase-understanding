@@ -139,7 +139,6 @@ async def auth_github_callback(request: Request):
 async def get_auth_status(request: Request):
     # Check if the user ID is in the session cookie
     github_id = request.session.get("auth_user_id")
-    # NEW: Read directly from our explicit cookie
     # github_id = request.cookies.get("auth_user_id")
     
 

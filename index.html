@@ -37,7 +37,7 @@
     <div id="setup-section" class="card hidden">
         <h2>Welcome, <span id="user-name"></span>!</h2>
         <!-- <a href="/logout" style="float: right; color: red;">Logout</a> -->
-        <a href="#" onclick="frontendLogout()" style="float: right; color: red;">Logout</a>
+        <a href="/" onclick="frontendLogout()" style="float: right; color: red;">Logout</a>
         
         <h3>1. Enter your OpenAI Key</h3>
         <input type="password" id="openai-key" placeholder="sk-proj-..." required>
@@ -143,9 +143,24 @@
 
     // 3. Frontend Logout Flow
     async function frontendLogout() {
-        await fetch('/auth/logout', { method: 'POST' });
-        window.location.reload(); 
+        // 1. We "await" the response so the browser doesn't kill the request
+        try {
+            if (event) event.preventDefault()
+            const response = await fetch('/auth/logout', { method: 'POST' });
+            
+            // 2. Once the server says "OK", then we move the user
+            if (response.ok) {
+                // Redirecting to "/" or "/login" is better than reload() 
+                // because it forces the page to see the "Logged Out" state.
+                window.location.href = "/"; 
+            }
+        } catch (err) {
+            console.error("Logout error:", err);
+            window.location.reload(); // Fallback
+        }
     }
+
+
 
     async function pollStatus() {
         const res = await fetch(`/api/status/${currentTaskId}`); // Status is public, no token needed
