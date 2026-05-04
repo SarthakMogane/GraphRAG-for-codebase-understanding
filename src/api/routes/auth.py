@@ -3,6 +3,7 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import RedirectResponse,JSONResponse
 from authlib.integrations.starlette_client import OAuth
 from src.core.config import get_settings 
+import asyncio
 
 settings = get_settings()
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -13,11 +14,27 @@ oauth.register(
     name='github',
     client_id=settings.GITHUB_CLIENT_ID,
     client_secret=settings.GITHUB_CLIENT_SECRET,
+    code_challenge_method='S256',
     access_token_url='https://github.com/login/oauth/access_token',
     authorize_url='https://github.com/login/oauth/authorize',
     api_base_url='https://api.github.com/',
     client_kwargs={'scope': 'user:email'}, 
 )
+
+
+# import hashlib
+# import base64
+# import secrets
+
+# # 1. The Verifier (High entropy random string)
+# code_verifier = secrets.token_urlsafe(32) 
+
+# # 2. The Challenge (SHA256 -> Base64URL -> 43 chars)
+# code_challenge_hash = hashlib.sha256(code_verifier.encode('ascii')).digest()
+# code_challenge = base64.urlsafe_b64encode(code_challenge_hash).decode('utf-8').replace('=', '')
+
+# # Result: code_challenge will be exactly 43 characters
+
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -28,7 +45,7 @@ async def login_via_github(request: Request):
     """
     redirect_uri = request.url_for('auth_github_callback')
     
-    return await oauth.github.authorize_redirect(request, redirect_uri)
+    return await oauth.github.authorize_redirect(request, redirect_uri,code_challenge_method='S256')
 
 
 @router.get("/github/callback", name="auth_github_callback")
@@ -37,6 +54,12 @@ async def auth_github_callback(request: Request):
     GitHub sends the user back here with a temporary 'code'.
     We exchange it for a token and fetch their identity.
     """
+    error = request.query_params.get('error')
+    if error:
+        if error == 'access_denied':
+            return RedirectResponse(url="/?error=denied")
+        raise HTTPException(status_code=400, detail=f"GitHub Error: {error}")
+    
     try:
         token_data = await oauth.github.authorize_access_token(request)
         user_oauth_token = token_data.get('access_token')
@@ -44,16 +67,27 @@ async def auth_github_callback(request: Request):
         if not user_oauth_token:
             raise HTTPException(status_code=400, detail="Failed to retrieve access token")
 
-        resp = await oauth.github.get('user', token=token_data)
-        resp.raise_for_status()
-        github_user = resp.json()
+        
+        tasks = [
+            oauth.github.get('user', token=token_data),
+            oauth.github.get('user/emails', token=token_data),
+            oauth.github.get('user/installations', token=token_data)
+        ]
 
-        # Fetch their private emails to find the primary one
-        email_resp = await oauth.github.get('user/emails', token=token_data)
-        email_resp.raise_for_status()
-        emails = email_resp.json()
-        primary_email = next((email['email'] for email in emails if email['primary']), None)
+        response = await asyncio.gather(*tasks)
+        user_resp, email_resp,installations_resp = response
 
+        if isinstance(user_resp,Exception):
+            raise HTTPException(status_code=500 , detail="Couldn't fetch Github Profile")
+        user_resp.raise_for_status()
+        github_user = user_resp.json()
+
+        if not isinstance(email_resp,Exception) and email_resp.status_code == 200:
+            emails = email_resp.json()
+            primary_email = next((email['email'] for email in emails if email['primary']), None)
+
+        if not isinstance(installations_resp, Exception) and installations_resp.status_code == 200:
+            install_data = installations_resp.json()
         # ----------------------------------------------------------------------
         # TODO: DATABASE SAVE
         # Here is where you would look up the user in your Postgres/SQLite database.
@@ -71,11 +105,6 @@ async def auth_github_callback(request: Request):
             "oauth_token": user_oauth_token
         }
         print(f"[DB MOCK] Saved User: {github_user['login']}")
-
-        
-        installations_resp = await oauth.github.get('user/installations', token=token_data)
-        installations_resp.raise_for_status()
-        install_data = installations_resp.json()
         
         app_slug = "repobeacon" 
         
@@ -89,16 +118,17 @@ async def auth_github_callback(request: Request):
             # They already installed it! Save the ID into our Mock DB
             MOCK_DB["installations"][github_id] = existing_install['id']
             print(f"[DB MOCK] Recovered existing installation ID: {existing_install['id']}")
-            
+
+        request.session["auth_user_id"] = github_id   
             #  RedirectResponse(url="http://127.0.0.1:5500/index.html",status_code= 302)
         response = RedirectResponse(url="/", status_code=302)
-        response.set_cookie(
-            key="auth_user_id",       # Our custom cookie name
-            value=github_id,          # The user ID string
-            httponly=True,            # Security: Stops JavaScript from stealing it
-            samesite="lax",           # Security: Tells Chrome it's safe for redirects
-            max_age=86400             # Expiration: 1 day
-        )
+        # response.set_cookie(
+        #     key="auth_user_id",       # Our custom cookie name
+        #     value=github_id,          # The user ID string
+        #     httponly=True,            # Security: Stops JavaScript from stealing it
+        #     samesite="lax",           # Security: Tells Chrome it's safe for redirects
+        #     max_age=86400             # Expiration: 1 day
+        # )
         return response
 
     except Exception as e:
@@ -108,9 +138,9 @@ async def auth_github_callback(request: Request):
 @router.get("/status")
 async def get_auth_status(request: Request):
     # Check if the user ID is in the session cookie
-    # github_id = request.session.get("github_id")
+    github_id = request.session.get("auth_user_id")
     # NEW: Read directly from our explicit cookie
-    github_id = request.cookies.get("auth_user_id")
+    # github_id = request.cookies.get("auth_user_id")
     
 
     # --- OUR DEBUG TRAP ---
@@ -139,10 +169,11 @@ async def get_auth_status(request: Request):
 @router.get("/install")
 async def redirect_to_github_install(request: Request):
     """The frontend calls this when the user actively clicks 'Connect GitHub'"""
-    # github_id = request.session.get("github_id")
-    github_id = request.cookies.get("auth_user_id")
+    github_id = request.session.get("auth_user_id")
+    # github_id = request.cookies.get("auth_user_id")
     if not github_id:
-        return RedirectResponse(url="http://127.0.0.1:5500/index.html")
+        # return RedirectResponse(url="http://127.0.0.8000/index.html")
+        return RedirectResponse(url='/')
         
     app_slug = "repobeacon"
     install_url = f"https://github.com/apps/{app_slug}/installations/new?state={github_id}"
@@ -151,10 +182,10 @@ async def redirect_to_github_install(request: Request):
 
 @router.post("/logout")
 async def logout(request: Request):
-    # request.session.clear()
+    request.session.clear()
     response = JSONResponse(content={"status": "logged_out"})
-    response.delete_cookie("auth_user_id")
-    return {"status": "logged_out"}
+    # response.delete_cookie("auth_user_id")
+    return JSONResponse(content={"success": True}, status_code=200)
 
 
 
