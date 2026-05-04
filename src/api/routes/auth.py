@@ -107,13 +107,7 @@ async def auth_github_callback(request: Request):
         request.session["auth_user_id"] = github_id   
             #  RedirectResponse(url="http://127.0.0.1:5500/index.html",status_code= 302)
         response = RedirectResponse(url="/", status_code=302)
-        # response.set_cookie(
-        #     key="auth_user_id",       # Our custom cookie name
-        #     value=github_id,          # The user ID string
-        #     httponly=True,            # Security: Stops JavaScript from stealing it
-        #     samesite="lax",           # Security: Tells Chrome it's safe for redirects
-        #     max_age=86400             # Expiration: 1 day
-        # )
+
         return response
 
     except Exception as e:
@@ -122,7 +116,6 @@ async def auth_github_callback(request: Request):
 
 @router.get("/status")
 async def get_auth_status(request: Request):
-    # Check if the user ID is in the session cookie
     github_id = request.session.get("auth_user_id")
     # github_id = request.cookies.get("auth_user_id")
     
