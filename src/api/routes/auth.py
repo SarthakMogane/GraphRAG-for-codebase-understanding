@@ -130,10 +130,10 @@ async def get_auth_status(request: Request):
     if not github_id:
         raise HTTPException(status_code=401, detail="Browser did not send the cookie")
     
-    if github_id not in MOCK_DB["users"]:
-        raise HTTPException(status_code=401, detail="Cookie received, but DB is empty!")
-    # if not github_id or github_id not in MOCK_DB["users"]:
-    #     raise HTTPException(status_code=401, detail="Not authenticated")
+    # if github_id not in MOCK_DB["users"]:
+    #     raise HTTPException(status_code=401, detail="Cookie received, but DB is empty!")
+    if not github_id or github_id not in MOCK_DB["users"]:
+        raise HTTPException(status_code=401, detail="Not authenticated")
         
     user_data = MOCK_DB["users"][github_id]
 
