@@ -42,7 +42,8 @@ async def auth_github_callback(request: Request):
     error = request.query_params.get('error')
     if error:
         if error == 'access_denied':
-            return RedirectResponse(url="/?error=denied")
+            # return RedirectResponse(url="/?error=denied")
+            return RedirectResponse(url="http://127.0.0.1:5500/?error=denied")
         raise HTTPException(status_code=400, detail=f"GitHub Error: {error}")
     
     try:
@@ -105,8 +106,9 @@ async def auth_github_callback(request: Request):
             print(f"[DB MOCK] Recovered existing installation ID: {existing_install['id']}")
 
         request.session["auth_user_id"] = github_id   
-            #  RedirectResponse(url="http://127.0.0.1:5500/index.html",status_code= 302)
-        response = RedirectResponse(url="/", status_code=302)
+        #update URL 
+        response = RedirectResponse(url="http://127.0.0.1:5500/index.html",status_code= 302)
+        # response = RedirectResponse(url="/", status_code=302)
 
         return response
 
@@ -149,8 +151,9 @@ async def redirect_to_github_install(request: Request):
     github_id = request.session.get("auth_user_id")
     # github_id = request.cookies.get("auth_user_id")
     if not github_id:
-        # return RedirectResponse(url="http://127.0.0.8000/index.html")
-        return RedirectResponse(url='/')
+        # update URL 
+        return RedirectResponse(url="http://127.0.0.8000/index.html")
+        # return RedirectResponse(url='/')
         
     app_slug = "repobeacon"
     install_url = f"https://github.com/apps/{app_slug}/installations/new?state={github_id}"
