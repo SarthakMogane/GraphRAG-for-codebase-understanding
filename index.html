@@ -72,25 +72,45 @@
 <script>
     window.onload = async () => {
     try {
-        // --- STEP 1: THE FAST-SYNC ---
-        // Catch the redirect from GitHub BEFORE we do anything else
         const urlParams = new URLSearchParams(window.location.search);
-        const newInstallId = urlParams.get('installation_id');
+        
+        // 1. Catch the Cancel Error (From earlier)
+        if (urlParams.get('error') === 'installation_canceled') {
+            alert("You canceled the GitHub connection. We need access to analyze your repositories!");
+            window.history.replaceState({}, document.title, window.location.pathname);
+        }
 
+        // 2. THE NEW TAB SELF-DESTRUCT LOGIC
+        const newInstallId = urlParams.get('installation_id');
         if (newInstallId) {
             console.log("Fast-syncing installation ID:", newInstallId);
+            
+            // Sync with the backend
             await fetch('/api/sync-installation', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ installation_id: parseInt(newInstallId) })
             });
-            // Clean the URL up so it looks professional
-            window.history.replaceState({}, document.title, window.location.pathname);
+            
+            // Tell the user it worked (just in case the browser blocks the auto-close)
+            document.body.innerHTML = `
+                <div style="text-align: center; margin-top: 100px; font-family: sans-serif;">
+                    <h2>✅ Connection Successful!</h2>
+                    <p>Closing this tab and returning you to the dashboard...</p>
+                </div>
+            `;
+
+            // KILL THE TAB!
+            window.close(); 
+            
+            // STOP executing the rest of the script. We don't want to load the UI here.
+            return; 
         }
 
-        // --- STEP 2: LOAD USER STATE ---
+        // --- STEP 3: LOAD USER STATE (For the main tab only) ---
         const res = await fetch('/auth/status', { credentials: 'include' });
         
+        // ... (the rest of your UI drawing logic stays exactly the same) ...
         if (res.ok) {
             const data = await res.json();
             document.getElementById('login-section').classList.add('hidden');
@@ -179,46 +199,68 @@
     }
 
 
-    function waitForInstall() {
+    function waitForInstall(popupWindow) {
     const connectSection = document.getElementById('connect-section');
-    
-    // 1. Save the original button HTML so we can put it back if they cancel
     const originalHTML = connectSection.innerHTML;
 
-    // 2. Change the UI to the loading state
+    // 1. Show the Loading UI
     connectSection.innerHTML = `
         <h2>Waiting for GitHub...</h2>
-        <p>Complete the installation in the new tab. If you canceled, just close the tab.</p>
+        <p>Complete the installation in the new tab.</p>
         <div class="spinner"></div>
         <br><br>
-        <button class="primary" onclick="window.location.reload()">I finished installing</button>
+        <button class="secondary" onclick="window.location.reload()">Cancel / Go Back</button>
     `;
 
-    // 3. Listen for them coming back
-    window.addEventListener('focus', async () => {
-        console.log("User came back! Checking status...");
-        
+    // 2. THE SUCCESS CATCHER (Polling)
+    const observer = setInterval(async () => {
         try {
             const res = await fetch('/auth/status', { credentials: 'include' });
             if (res.ok) {
                 const data = await res.json();
-                
                 if (data.is_installed) {
-                    // SUCCESS: They installed it! Reload to show the repos.
-                    window.location.reload(); 
-                } else {
-                    // CANCELED: They came back but didn't install. 
-                    // Put the original "Connect" button back!
-                    console.log("No installation found. Reverting UI.");
-                    connectSection.innerHTML = originalHTML;
+                    clearInterval(observer); // Stop polling!
+                    if (popupWindow && !popupWindow.closed) popupWindow.close(); // Clean up tab
+                    
+                    connectSection.innerHTML = `<h2>✅ Connected! Loading repos...</h2><div class="spinner"></div>`;
+                    setTimeout(() => window.location.reload(), 1500);
                 }
             }
         } catch (err) {
-            console.error("Failed to check status", err);
-            connectSection.innerHTML = originalHTML; // Fail safely
+            console.error("Polling error:", err);
         }
-    }, { once: true }); 
+    }, 1500);
+
+    // 3. THE CANCEL CATCHER (Focus Event)
+    // When the user closes the tab, their screen "focuses" back on the main window.
+    window.addEventListener('focus', () => {
+        console.log("Main window focused. Checking if tab was closed...");
+        
+        // We check popupWindow.closed here to prevent a bug where the user just 
+        // Alt-Tabs away to check their email and Alt-Tabs back.
+        if (!popupWindow || popupWindow.closed) {
+            
+            // Wait 500ms just in case the fast-sync is finishing at this exact millisecond
+            setTimeout(async () => {
+                try {
+                    const res = await fetch('/auth/status', { credentials: 'include' });
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (!data.is_installed) {
+                            console.log("Installation canceled. Killing polling and reverting UI.");
+                            clearInterval(observer); // Kill the polling loop!
+                            connectSection.innerHTML = originalHTML; // Put button back
+                        }
+                    }
+                } catch (err) {
+                    clearInterval(observer);
+                    connectSection.innerHTML = originalHTML;
+                }
+            }, 500);
+        }
+    });
 }
+
     async function pollStatus() {
         const res = await fetch(`/api/status/${currentTaskId}`); // Status is public, no token needed
         const data = await res.json();
