@@ -161,7 +161,7 @@
             document.getElementById('repo-list').innerHTML = `
                 <div style="color: red;">Session expired. Please log out and log back in.</div>
             `;
-            return; // Stop right here. No loop!
+            return; 
         }
             
             const repos = await response.json();
