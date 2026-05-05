@@ -65,40 +65,57 @@
     <div id="connect-section" class="card hidden" style="text-align: center;">
         <h2>Connect your Code</h2>
         <p>To analyze your codebase, you need to grant the GraphRAG engine read-access to your repositories.</p>
-        <button class="primary" onclick="window.location.href='/auth/install'">Connect GitHub Repositories</button>
+        <!-- <button class="primary" onclick="window.location.href='/auth/install'">Connect GitHub Repositories</button> -->
+         <button class="primary" onclick="window.open('/auth/install', '_blank'); waitForInstall();">Connect GitHub Repositories</button>
     </div>
 
 <script>
     window.onload = async () => {
-        try {
-            // const res = await fetch('http:127.0.0.1:8000/auth/status', { credentials: 'include' }); 
-            const res = await fetch('/auth/status', { credentials: 'include' });
-            if (res.ok) {
-                const data = await res.json();
-                document.getElementById('login-section').classList.add('hidden');
-                document.getElementById('user-name').innerText = data.username;
-                
-                // THE NEW UX LOGIC
-                if (data.is_installed) {
-                    // They installed it! Show the repos.
-                    document.getElementById('setup-section').classList.remove('hidden');
-                    fetchRepos();
-                } else {
-                    // Logged in, but haven't connected repos yet.
-                    document.getElementById('connect-section').classList.remove('hidden');
-                    document.getElementById('setup-section').classList.remove('hidden');
-                    // Hide the repo list area since it's empty
-                    document.getElementById('repo-list').innerHTML = "<em>Please connect GitHub to see repositories.</em>";
-                }
+    try {
+        // --- STEP 1: THE FAST-SYNC ---
+        // Catch the redirect from GitHub BEFORE we do anything else
+        const urlParams = new URLSearchParams(window.location.search);
+        const newInstallId = urlParams.get('installation_id');
+
+        if (newInstallId) {
+            console.log("Fast-syncing installation ID:", newInstallId);
+            await fetch('/api/sync-installation', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ installation_id: parseInt(newInstallId) })
+            });
+            // Clean the URL up so it looks professional
+            window.history.replaceState({}, document.title, window.location.pathname);
+        }
+
+        // --- STEP 2: LOAD USER STATE ---
+        const res = await fetch('/auth/status', { credentials: 'include' });
+        
+        if (res.ok) {
+            const data = await res.json();
+            document.getElementById('login-section').classList.add('hidden');
+            document.getElementById('user-name').innerText = data.username;
+            
+            // --- STEP 3: DRAW THE UI ---
+            if (data.is_installed) {
+                // They installed it! Show the repos.
+                document.getElementById('setup-section').classList.remove('hidden');
+                fetchRepos(); 
             } else {
-                document.getElementById('login-section').classList.remove('hidden');
+                // Logged in, but haven't connected repos yet.
+                document.getElementById('connect-section').classList.remove('hidden');
+                document.getElementById('setup-section').classList.remove('hidden');
+                document.getElementById('repo-list').innerHTML = "<em>Please connect GitHub to see repositories.</em>";
             }
-        } catch (e) {
+        } else {
             document.getElementById('login-section').classList.remove('hidden');
         }
-    };
+    } catch (e) {
+        console.error("Initialization error:", e);
+        document.getElementById('login-section').classList.remove('hidden');
+    }
+};
     
-
     // 2. The API calls are now cleaner (No more 'Authorization' headers!)
     async function fetchRepos() {
         try {
@@ -121,6 +138,7 @@
         }
     }
 
+    
     async function startIngestion(repoUrl) {
         const apiKey = document.getElementById('openai-key').value;
         if (!apiKey) { alert('Please enter your OpenAI API key first.'); return; }
@@ -161,7 +179,46 @@
     }
 
 
+    function waitForInstall() {
+    const connectSection = document.getElementById('connect-section');
+    
+    // 1. Save the original button HTML so we can put it back if they cancel
+    const originalHTML = connectSection.innerHTML;
 
+    // 2. Change the UI to the loading state
+    connectSection.innerHTML = `
+        <h2>Waiting for GitHub...</h2>
+        <p>Complete the installation in the new tab. If you canceled, just close the tab.</p>
+        <div class="spinner"></div>
+        <br><br>
+        <button class="primary" onclick="window.location.reload()">I finished installing</button>
+    `;
+
+    // 3. Listen for them coming back
+    window.addEventListener('focus', async () => {
+        console.log("User came back! Checking status...");
+        
+        try {
+            const res = await fetch('/auth/status', { credentials: 'include' });
+            if (res.ok) {
+                const data = await res.json();
+                
+                if (data.is_installed) {
+                    // SUCCESS: They installed it! Reload to show the repos.
+                    window.location.reload(); 
+                } else {
+                    // CANCELED: They came back but didn't install. 
+                    // Put the original "Connect" button back!
+                    console.log("No installation found. Reverting UI.");
+                    connectSection.innerHTML = originalHTML;
+                }
+            }
+        } catch (err) {
+            console.error("Failed to check status", err);
+            connectSection.innerHTML = originalHTML; // Fail safely
+        }
+    }, { once: true }); 
+}
     async function pollStatus() {
         const res = await fetch(`/api/status/${currentTaskId}`); // Status is public, no token needed
         const data = await res.json();
