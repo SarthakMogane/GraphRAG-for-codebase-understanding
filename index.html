@@ -82,31 +82,57 @@
             window.history.replaceState({}, document.title, window.location.pathname);
         }
 
-        // 2. THE NEW TAB SELF-DESTRUCT LOGIC
+        // 2. THE ASYNC WAITING ROOM
         const newInstallId = urlParams.get('installation_id');
         if (newInstallId) {
-            console.log("Fast-syncing installation ID:", newInstallId);
             
-            // Sync with the backend   ----update URL 
-            await fetch('http://127.0.0.1:8000/api/sync-installation', {  
-                method: 'POST',
-                credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ installation_id: parseInt(newInstallId) })
-            });
-            
-            // Tell the user it worked (just in case the browser blocks the auto-close)
+            // Trap the user with a loading screen
             document.body.innerHTML = `
                 <div style="text-align: center; margin-top: 100px; font-family: sans-serif;">
-                    <h2>✅ Connection Successful!</h2>
-                    <p>Closing this tab and returning you to the dashboard...</p>
+                    <h2>⏳ Waiting for GitHub...</h2>
+                    <p>GitHub is securely confirming your installation in the background.</p>
+                    <div class="spinner" style="margin-top: 20px;"></div>
                 </div>
             `;
-
-            // KILL THE TAB!
-            window.close(); 
             
-            // STOP executing the rest of the script. We don't want to load the UI here.
+            // Poll the backend every 1.5 seconds. 
+            // Once the webhook hits the backend, this will return true!
+            const checkWebhook = setInterval(async () => {
+                try {
+                    const res = await fetch('http://127.0.0.1:8000/auth/status', { credentials: 'include' });
+                    if (res.ok) {
+                        const data = await res.json();
+                        
+                        // Did the webhook update the database yet?
+                        if (data.is_installed) {
+                            clearInterval(checkWebhook); // Stop polling
+                            
+                            document.body.innerHTML = `
+                                <div style="text-align: center; margin-top: 100px; font-family: sans-serif; color: green;">
+                                    <h2>✅ Installation Confirmed!</h2>
+                                    <p>Closing this tab and returning to your dashboard...</p>
+                                </div>
+                            `;
+                            
+                            // Auto-close the tab!
+                            setTimeout(() => {
+                                if (window.opener) {
+                                    // 1. Popup Flow (Initial Install) -> Close the tab
+                                    window.close(); 
+                                } else {
+                                    // 2. Same-Tab Flow (Permission Update) -> Clean the URL and show dashboard
+                                    // This strips away the ?installation_id=123 without reloading the whole page
+                                    window.location.replace(window.location.pathname); 
+                                }
+                            }, 1500);
+                        }
+                    }
+                } catch (e) {
+                    console.error("Polling failed", e);
+                }
+            }, 1500);
+
+            // STOP the rest of the UI from drawing in this popup tab
             return; 
         }
 
