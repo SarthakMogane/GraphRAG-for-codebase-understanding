@@ -149,7 +149,7 @@ async def get_auth_status(request: Request):
 async def redirect_to_github_install(request: Request):
     """The frontend calls this when the user actively clicks 'Connect GitHub'"""
     github_id = request.session.get("auth_user_id")
-    # github_id = request.cookies.get("auth_user_id")
+
     if not github_id:
         # update URL 
         return RedirectResponse(url="http://127.0.0.8000/index.html")
