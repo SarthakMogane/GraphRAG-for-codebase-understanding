@@ -156,7 +156,7 @@ async def redirect_to_github_install(request: Request):
         # return RedirectResponse(url='/')
         
     app_slug = "repobeacon"
-    install_url = f"https://github.com/apps/{app_slug}/installations/new?state={github_id}"
+    install_url = f"https://github.com/apps/{app_slug}/installations/new"
     
     return RedirectResponse(url=install_url)
 
