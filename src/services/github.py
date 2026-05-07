@@ -211,83 +211,83 @@ class GitHubService:
         resp.raise_for_status()
         return resp.json()
 
-    # ── User API Calls (OAuth Token) ──────────────────────────────────────────
+#     # ── User API Calls (OAuth Token) ──────────────────────────────────────────
 
-# ── User API Calls (OAuth Token) ──────────────────────────────────────────
+# # ── User API Calls (OAuth Token) ──────────────────────────────────────────
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
-    async def get_installed_repositories(self, user_oauth_token: str, installation_id: int) -> list:
-        """
-        Fetches ONLY the repositories the user explicitly granted access to 
-        during the GitHub App installation.
-        """
-        data = await self._get_as_user(
-            f"user/installations/{installation_id}/repositories", 
-            user_oauth_token, 
-            params={"per_page": 100} # Grab up to 100 permitted repos at once
-        )
-        return data.get("repositories", [])
+#     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+#     async def get_installed_repositories(self, user_oauth_token: str, installation_id: int) -> list:
+#         """
+#         Fetches ONLY the repositories the user explicitly granted access to 
+#         during the GitHub App installation.
+#         """
+#         data = await self._get_as_user(
+#             f"user/installations/{installation_id}/repositories", 
+#             user_oauth_token, 
+#             params={"per_page": 100} # Grab up to 100 permitted repos at once
+#         )
+#         return data.get("repositories", [])
 
 
-    # ── App API Calls (Installation Token) ────────────────────────────────────
+#     # ── App API Calls (Installation Token) ────────────────────────────────────
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
-    async def get_repo_branches(self, owner: str, repo: str, installation_id: int) -> list[str]:
-        """
-        Fetches branches of a repository using the App Installation token.
-        Moved to Server-to-Server so background workers can fetch branches 
-        without needing an active human session.
-        """
-        branches = await self._get_as_app(f"repos/{owner}/{repo}/branches", installation_id)
-        return [b["name"] for b in branches]
+#     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+#     async def get_repo_branches(self, owner: str, repo: str, installation_id: int) -> list[str]:
+#         """
+#         Fetches branches of a repository using the App Installation token.
+#         Moved to Server-to-Server so background workers can fetch branches 
+#         without needing an active human session.
+#         """
+#         branches = await self._get_as_app(f"repos/{owner}/{repo}/branches", installation_id)
+#         return [b["name"] for b in branches]
 
-    # ── App API Calls (Installation Token) ────────────────────────────────────
+#     # ── App API Calls (Installation Token) ────────────────────────────────────
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), retry=retry(should_retry_httpx_error))
-    async def get_repo_metadata(self, owner: str, repo: str, installation_id: int) -> RepoMetadata:
-        data = await self._get_as_app(f"/repos/{owner}/{repo}", installation_id)
-        root_files = await self._get_root_file_list(owner, repo, data["default_branch"], installation_id)
+#     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), retry=retry(should_retry_httpx_error))
+#     async def get_repo_metadata(self, owner: str, repo: str, installation_id: int) -> RepoMetadata:
+#         data = await self._get_as_app(f"/repos/{owner}/{repo}", installation_id)
+#         root_files = await self._get_root_file_list(owner, repo, data["default_branch"], installation_id)
         
-        return RepoMetadata(
-            owner=data["owner"]["login"],
-            name=data["name"],
-            github_id=data["id"],
-            default_branch=data["default_branch"],
-            primary_language=data.get("language"),
-            size_kb=data["size"],
-            is_fork=data["fork"],
-            is_private=data["private"],
-            is_archived=data["archived"],
-            is_empty=data["size"] == 0,
-            has_submodules=".gitmodules" in root_files,
-            uses_git_lfs=".gitattributes" in root_files,
-            description=data.get("description"),
-            topics=data.get("topics", []),
-        )
+#         return RepoMetadata(
+#             owner=data["owner"]["login"],
+#             name=data["name"],
+#             github_id=data["id"],
+#             default_branch=data["default_branch"],
+#             primary_language=data.get("language"),
+#             size_kb=data["size"],
+#             is_fork=data["fork"],
+#             is_private=data["private"],
+#             is_archived=data["archived"],
+#             is_empty=data["size"] == 0,
+#             has_submodules=".gitmodules" in root_files,
+#             uses_git_lfs=".gitattributes" in root_files,
+#             description=data.get("description"),
+#             topics=data.get("topics", []),
+#         )
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
-    async def _get_root_file_list(self, owner: str, repo: str, branch: str, installation_id: int) -> set[str]:
-        data = await self._get_as_app(f"/repos/{owner}/{repo}/git/trees/{branch}", installation_id)
-        return {entry["path"] for entry in data.get("tree", [])}
+#     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+#     async def _get_root_file_list(self, owner: str, repo: str, branch: str, installation_id: int) -> set[str]:
+#         data = await self._get_as_app(f"/repos/{owner}/{repo}/git/trees/{branch}", installation_id)
+#         return {entry["path"] for entry in data.get("tree", [])}
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
-    async def get_full_tree(self, owner: str, repo: str, sha: str, installation_id: int) -> list[TreeEntry]:
-        data = await self._get_as_app(
-            f"/repos/{owner}/{repo}/git/trees/{sha}",
-            installation_id,
-            params={"recursive": "1"},
-        )
-        if data.get("truncated"):
-            logger.warning("Tree response truncated for %s/%s", owner, repo)
+#     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+#     async def get_full_tree(self, owner: str, repo: str, sha: str, installation_id: int) -> list[TreeEntry]:
+#         data = await self._get_as_app(
+#             f"/repos/{owner}/{repo}/git/trees/{sha}",
+#             installation_id,
+#             params={"recursive": "1"},
+#         )
+#         if data.get("truncated"):
+#             logger.warning("Tree response truncated for %s/%s", owner, repo)
 
-        return [
-            TreeEntry(
-                path=entry["path"],
-                type=entry["type"],
-                sha=entry["sha"],
-                size=entry.get("size"),
-            ) for entry in data.get("tree", [])
-        ]
+#         return [
+#             TreeEntry(
+#                 path=entry["path"],
+#                 type=entry["type"],
+#                 sha=entry["sha"],
+#                 size=entry.get("size"),
+#             ) for entry in data.get("tree", [])
+#         ]
 
     # ── Webhook Payload Validation ────────────────────────────────────────────
 
