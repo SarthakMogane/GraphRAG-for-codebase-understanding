@@ -100,6 +100,22 @@
             const checkWebhook = setInterval(async () => {
                 try {
                     const res = await fetch('http://127.0.0.1:8000/auth/status', { credentials: 'include' });
+
+                    // THE FIX: Catch the dead session!
+                    if (res.status === 401) {
+                        clearInterval(checkWebhook); // Stop polling immediately
+                        console.error("Session dead during polling.");
+                        
+                        document.body.innerHTML = `
+                            <div style="text-align: center; margin-top: 100px; font-family: sans-serif; color: red;">
+                                <h2>❌ Session Expired</h2>
+                                <p>Your login session was lost during the update.</p>
+                                <button class="primary" onclick="window.location.href='/'">Return to Login</button>
+                            </div>
+                        `;
+                        return; // Stop execution
+                    }
+                    
                     if (res.ok) {
                         const data = await res.json();
                         
@@ -294,30 +310,45 @@
 
     // 3. THE CANCEL CATCHER (Focus Event)
     // When the user closes the tab, their screen "focuses" back on the main window.
+    // 3. THE CANCEL (AND SNEAKY SUCCESS) CATCHER
     window.addEventListener('focus', () => {
-        console.log("Main window focused. Checking if tab was closed...");
+        console.log("Main window focused. Checking status...");
         
-        // We check popupWindow.closed here to prevent a bug where the user just 
-        // Alt-Tabs away to check their email and Alt-Tabs back.
         if (!popupWindow || popupWindow.closed) {
             
-            // Wait 500ms just in case the fast-sync is finishing at this exact millisecond
+            // Wait 500ms for network stability
             setTimeout(async () => {
                 try {
-                    //  update URL 
-                    // const res = await fetch('/auth/status', { credentials: 'include' });
                     const res = await fetch('http://127.0.0.1:8000/auth/status', { credentials: 'include' });
                     if (res.ok) {
                         const data = await res.json();
-                        if (!data.is_installed) {
-                            console.log("Installation canceled. Killing polling and reverting UI.");
-                            clearInterval(observer); // Kill the polling loop!
-                            connectSection.innerHTML = originalHTML; // Put button back
+                        
+                        if (data.is_installed) {
+                            // THE FIX: They successfully installed it while we weren't looking!
+                            console.log("Late installation detected! Updating UI.");
+                            clearInterval(observer); // Stop any lingering polling
+                            
+                            const connectSection = document.getElementById('connect-section');
+                            if (connectSection) {
+                                connectSection.innerHTML = `<h2>✅ Connected! Loading repos...</h2><div class="spinner"></div>`;
+                            }
+                            // Reload to show the dashboard
+                            setTimeout(() => window.location.reload(), 1500);
+
+                        } else {
+                            // They actually canceled. Kill polling and revert.
+                            console.log("Installation canceled. Reverting UI.");
+                            clearInterval(observer); 
+                            
+                            const connectSection = document.getElementById('connect-section');
+                            if (connectSection) {
+                                connectSection.innerHTML = originalHTML; 
+                            }
                         }
                     }
                 } catch (err) {
                     clearInterval(observer);
-                    connectSection.innerHTML = originalHTML;
+                    document.getElementById('connect-section').innerHTML = originalHTML;
                 }
             }, 500);
         }
