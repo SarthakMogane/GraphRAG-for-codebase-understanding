@@ -205,15 +205,15 @@ class GitHubService:
     async def close(self):
         await self.client.aclose()
 
-    # async def _get_as_app(self, path: str, installation_id: int, params: dict = None) -> dict:
-    #     """Authenticated GET using the App Installation Token (Server-to-Server)."""
-    #     token = await self.auth.get_installation_token(installation_id)
-    #     headers = {
-    #         "Authorization": f"Bearer {token}",
-    #         "Accept": "application/vnd.github+json",
-    #         "X-GitHub-Api-Version": "2022-11-28",
-    #     }
-    #     return await self._execute_request(path, headers, params)
+    async def _get_as_app(self, path: str, installation_id: int, params: dict = None) -> dict:
+        """Authenticated GET using the App Installation Token (Server-to-Server)."""
+        token = await self.auth.get_installation_token(installation_id)
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        return await self._execute_request(path, headers, params)
 
     async def _get_as_user(self, path: str, user_oauth_token: str ,params: dict = None) -> dict:
         """Authenticated GET using the User's OAuth Token (User-to-Server)."""
