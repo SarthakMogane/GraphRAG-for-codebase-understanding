@@ -80,8 +80,4 @@ async def list_branches(owner: str, repo: str, request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch branches: {str(e)}")
 
-from pydantic import BaseModel
-
-class SyncInstallRequest(BaseModel):
-    installation_id: int
 
