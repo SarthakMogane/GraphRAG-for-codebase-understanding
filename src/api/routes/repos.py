@@ -35,12 +35,16 @@ async def list_installed_repositories(request: Request):
             installation_id=installation_id
         )
         
+        
         # 4. Format the data to match exactly what your index.html expects
         formatted_repos = [
             {
                 "name": repo["full_name"],
                 "private": repo["private"],
-                "url": repo["html_url"]
+                "url": repo["html_url"],
+                "visibility":repo["visibility"],
+                "default_branch":repo["default_branch"],
+                "size":repo["size"],
             }
             for repo in raw_repos
         ]
