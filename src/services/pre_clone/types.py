@@ -244,3 +244,5 @@ class MonorepoDetectionResult:
     @property
     def total_subproject_count(self) -> int:
         return len(self.all_subprojects)
+    
+    
