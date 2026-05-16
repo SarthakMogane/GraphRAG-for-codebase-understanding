@@ -1,436 +1,406 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Your GraphRAG App</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; line-height: 1.6; }
-        .hidden { display: none; }
-        .card { border: 1px solid #ddd; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .repo-btn { display: block; width: 100%; text-align: left; padding: 10px; margin: 5px 0; background: #f8f9fa; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; }
-        .repo-btn:hover { background: #e9ecef; }
-        input[type="text"], input[type="password"] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;}
-        button.primary { background: #2ea44f; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold;}
-        button.primary:hover { background: #2c974b; }
-        #chat-box { height: 300px; overflow-y: scroll; border: 1px solid #ddd; padding: 10px; margin-bottom: 10px; border-radius: 4px; background: #fafafa;}
-        .msg { margin-bottom: 10px; padding: 8px; border-radius: 4px; }
-        .user-msg { background: #e3f2fd; text-align: right; }
-        .ai-msg { background: #f1f8e9; }
-        .spinner { display: inline-block; width: 20px; height: 20px; border: 3px solid rgba(0,0,0,.3); border-radius: 50%; border-top-color: #000; animation: spin 1s ease-in-out infinite; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GraphRAG Code Assistant</title>
 
-    </head>
+<style>
+body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; max-width:1000px; margin:40px auto; padding:20px; line-height:1.6; background:#0d1117; color:white; }
+.hidden { display:none !important; }
+.card { border:1px solid #30363d; padding:20px; border-radius:16px; margin-bottom:20px; background:#161b22; }
+input[type="text"], input[type="password"] { width:100%; padding:12px; margin:10px 0; border:1px solid #30363d; border-radius:8px; background:#0d1117; color:white; box-sizing:border-box; }
+button.primary { background:#238636; color:white; border:none; padding:12px 20px; border-radius:8px; cursor:pointer; font-size:16px; font-weight:bold; }
+button.primary:hover { background:#2ea043; }
+#chat-box { height:300px; overflow-y:scroll; border:1px solid #30363d; padding:10px; margin-bottom:10px; border-radius:8px; background:#0d1117; }
+.msg { margin-bottom:10px; padding:10px; border-radius:8px; }
+.user-msg { background:#1f6feb33; text-align:right; }
+.ai-msg { background:#23863622; }
+.spinner { display:inline-block; width:20px; height:20px; border:3px solid rgba(255,255,255,.3); border-radius:50%; border-top-color:#fff; animation:spin 1s ease-in-out infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+
+/* REPO DASHBOARD UI */
+.repo-list { display:flex; flex-direction:column; gap:16px; }
+.repo-card { background:#161b22; border:1px solid #30363d; border-radius:18px; padding:20px; display:flex; justify-content:space-between; align-items:center; }
+.repo-left { display:flex; gap:18px; align-items:flex-start; }
+.repo-icon { width:56px; height:56px; border-radius:14px; background:#0d1117; display:flex; align-items:center; justify-content:center; font-size:24px; }
+.repo-content { display:flex; flex-direction:column; }
+.repo-name { font-size:22px; font-weight:700; }
+.repo-meta { color:#8b949e; font-size:14px; }
+.repo-right { display:flex; align-items:center; gap:16px; }
+.badge { padding:7px 14px; border-radius:999px; font-size:14px; font-weight:700; }
+.badge-indexed { background:#16361f; color:#56d364; }
+.badge-stale { background:#3d2e0f; color:#f5b642; }
+.badge-indexing { background:#173b63; color:#58a6ff; }
+.badge-paused { background:#333; color:#ddd; }
+.badge-not-indexed { background:#2d333b; color:#c9d1d9; }
+.badge-failed { background:#4d1f1f; color:#ff7b72; }
+.repo-btn { background:#21262d; border:1px solid #30363d; color:white; padding:10px 18px; border-radius:10px; font-size:15px; font-weight:700; cursor:pointer; }
+.repo-btn:hover { background:#30363d; }
+.progress { width:120px; height:8px; border-radius:999px; background:#30363d; overflow:hidden; }
+.progress-bar { width:70%; height:100%; background:#58a6ff; }
+.small-text { color:#8b949e; font-size:13px; }
+</style>
+</head>
 <body>
 
-    <h1>🧠 GraphRAG Code Assistant</h1>
+<h1>🧠 GraphRAG Code Assistant</h1>
+
+<div id="login-section" class="card hidden">
+    <h2>Welcome to the demo</h2>
+    <p>Login with GitHub to select a repository you want to analyze.</p>
+    <button class="primary" onclick="window.location.href='http://127.0.0.1:8000/auth/login'">Login with GitHub</button>
+</div>
+
+<div id="profile-section" class="card hidden" style="display: flex; justify-content: space-between; align-items: center;">
+    <h2 style="margin: 0;">Welcome, <span id="user-name"></span>!</h2>
+    <a href="#" onclick="frontendLogout(event)" style="color: #ff7b72; font-weight: bold; text-decoration: none;">Logout ↗</a>
+</div>
+
+<div id="connect-section" class="card hidden" style="text-align:center;">
+    <h2>Connect your Code</h2>
+    <p>To analyze your codebase, you need to grant the GraphRAG engine read-access to your repositories.</p>
+    <button class="primary" onclick="waitForInstall()">Connect GitHub Repositories</button>
+</div>
+
+<div id="setup-section" class="card hidden">
+    <h3>1. Enter your OpenAI Key</h3>
+    <input type="password" id="openai-key" placeholder="sk-proj-..." required>
     
-    <div id="login-section" class="card hidden">
-        <h2>Welcome to the demo</h2>
-        <p>Login with GitHub to select a repository you want to analyze.</p>
-        <button class="primary" onclick="window.location.href='http://127.0.0.1:8000/auth/login'">Login with GitHub</button>
-         <!-- <button class="primary" onclick="window.location.href='/auth/login'">Login with GitHub</button> -->
-        
-    </div>
+    <h3>2. Your repositories</h3>
+    <div id="repo-list" class="repo-list">Loading repositories...</div>
+</div>
 
-    <div id="setup-section" class="card hidden">
-        <h2>Welcome, <span id="user-name"></span>!</h2>
-        <!-- <a href="/logout" style="float: right; color: red;">Logout</a> -->
-         <!-- update URL  -->
-        <!-- <a href="/" onclick="frontendLogout()" style="float: right; color: red;">Logout</a> -->
-        <a href="/" onclick="frontendLogout()" style="float: right; color: red;">Logout</a>
-        
-        <h3>1. Enter your OpenAI Key</h3>
-        <input type="password" id="openai-key" placeholder="sk-proj-..." required>
-        
-        <h3>2. Select a Repository to Ingest</h3>
-        <div id="repo-list">Loading your repositories...</div>
+<div id="chat-section" class="card hidden">
+    <h2>Chat with your Repo</h2>
+    <div id="chat-box"></div>
+    <div style="display:flex;gap:10px;">
+        <input type="text" id="chat-input" placeholder="Ask a question about the codebase...">
+        <button class="primary" onclick="sendMessage()">Send</button>
     </div>
-
-
-    <div id="loading-section" class="card hidden" style="text-align: center;">
-        <h2><div class="spinner"></div> Building Knowledge Graph...</h2>
-        <p id="loading-status">Cloning repository and extracting entities. This may take a few minutes.</p>
-    </div>
-
-    <div id="chat-section" class="card hidden">
-        <h2>Chat with your Repo</h2>
-        <div id="chat-box"></div>
-        <div style="display: flex; gap: 10px;">
-            <input type="text" id="chat-input" placeholder="Ask a question about the codebase...">
-            <button class="primary" onclick="sendMessage()">Send</button>
-        </div>
-    </div>
-
-    <div id="connect-section" class="card hidden" style="text-align: center;">
-        <h2>Connect your Code</h2>
-        <p>To analyze your codebase, you need to grant the GraphRAG engine read-access to your repositories.</p>
-        <!-- update url -->
-         <!-- <button class="primary" onclick="window.open('/auth/install', '_blank'); waitForInstall();">Connect GitHub Repositories</button> -->
-         <button class="primary" onclick="window.open('http://127.0.0.1:8000/auth/install', '_blank'); waitForInstall();">Connect GitHub Repositories</button>
-    </div>
+</div>
 
 <script>
-    window.onload = async () => {
-    try {
-        const urlParams = new URLSearchParams(window.location.search);
+let currentTaskId = null;
+let popupWindow = null;
+let authObserver = null; 
+
+/* =========================================
+1. AUTHENTICATION & UI SETUP
+========================================= */
+window.onload = async () => {
+    const urlParams = new URLSearchParams(window.location.search);
+    
+    if (urlParams.get('error') === 'installation_canceled') {
+        alert("You canceled the GitHub connection. We need access to analyze your repositories!");
+        window.history.replaceState({}, document.title, window.location.pathname);
+    }
+
+    const newInstallId = urlParams.get('installation_id');
+    if (newInstallId) {
+        document.body.innerHTML = `
+            <div style="text-align: center; margin-top: 100px; font-family: sans-serif;">
+                <h2>⏳ Waiting for GitHub...</h2>
+                <p>GitHub is securely confirming your installation in the background.</p>
+                <div class="spinner" style="margin-top: 20px;"></div>
+            </div>`;
         
-        // 1. Catch the Cancel Error (From earlier)
-        if (urlParams.get('error') === 'installation_canceled') {
-            alert("You canceled the GitHub connection. We need access to analyze your repositories!");
-            window.history.replaceState({}, document.title, window.location.pathname);
-        }
-
-        // 2. THE ASYNC WAITING ROOM
-        const newInstallId = urlParams.get('installation_id');
-        if (newInstallId) {
-            
-            // Trap the user with a loading screen
-            document.body.innerHTML = `
-                <div style="text-align: center; margin-top: 100px; font-family: sans-serif;">
-                    <h2>⏳ Waiting for GitHub...</h2>
-                    <p>GitHub is securely confirming your installation in the background.</p>
-                    <div class="spinner" style="margin-top: 20px;"></div>
-                </div>
-            `;
-            
-            // Poll the backend every 1.5 seconds. 
-            // Once the webhook hits the backend, this will return true!
-            const checkWebhook = setInterval(async () => {
-                try {
-                    const res = await fetch('http://127.0.0.1:8000/auth/status', { credentials: 'include' });
-
-                    // THE FIX: Catch the dead session!
-                    if (res.status === 401) {
-                        clearInterval(checkWebhook); // Stop polling immediately
-                        console.error("Session dead during polling.");
-                        
-                        document.body.innerHTML = `
-                            <div style="text-align: center; margin-top: 100px; font-family: sans-serif; color: red;">
-                                <h2>❌ Session Expired</h2>
-                                <p>Your login session was lost during the update.</p>
-                                <button class="primary" onclick="window.location.href='/'">Return to Login</button>
-                            </div>
-                        `;
-                        return; // Stop execution
-                    }
-
-                    if (res.ok) {
-                        const data = await res.json();
-                        
-                        // Did the webhook update the database yet?
-                        if (data.is_installed) {
-                            clearInterval(checkWebhook); // Stop polling
-                            
-                            document.body.innerHTML = `
-                                <div style="text-align: center; margin-top: 100px; font-family: sans-serif; color: green;">
-                                    <h2>✅ Installation Confirmed!</h2>
-                                    <p>Closing this tab and returning to your dashboard...</p>
-                                </div>
-                            `;
-                            
-                            // Auto-close the tab!
-                            setTimeout(() => {
-                                if (window.opener) {
-                                    // 1. Popup Flow (Initial Install) -> Close the tab
-                                    window.close(); 
-                                } else {
-                                    // 2. Same-Tab Flow (Permission Update) -> Clean the URL and show dashboard
-                                    // This strips away the ?installation_id=123 without reloading the whole page
-                                    window.location.replace(window.location.pathname); 
-                                }
-                            }, 1500);
-                        }
-                    }
-                } catch (e) {
-                    console.error("Polling failed", e);
+        const checkWebhook = setInterval(async () => {
+            try {
+                const res = await fetch('http://127.0.0.1:8000/auth/status', { credentials: 'include' });
+                if (res.status === 401) {
+                    clearInterval(checkWebhook);
+                    document.body.innerHTML = `<div style="text-align: center; margin-top: 100px; color: red;"><h2>❌ Session Expired</h2><button class="primary" onclick="window.location.href='/'">Return to Login</button></div>`;
+                    return;
                 }
-            }, 1500);
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.is_installed) {
+                        clearInterval(checkWebhook);
+                        document.body.innerHTML = `<div style="text-align: center; margin-top: 100px; color: green;"><h2>✅ Installation Confirmed!</h2><p>Closing this tab...</p></div>`;
+                        setTimeout(() => {
+                            if (window.opener) window.close(); 
+                            else window.location.replace(window.location.pathname); 
+                        }, 1500);
+                    }
+                }
+            } catch (e) {}
+        }, 1500);
+        return; 
+    }
 
-            // STOP the rest of the UI from drawing in this popup tab
-            return; 
-        }
+    window.addEventListener('focus', () => {
+        setTimeout(async () => {
+            try {
+                const res = await fetch('http://127.0.0.1:8000/auth/status', { credentials: 'include' });
+                if (res.ok) {
+                    const data = await res.json();
+                    const connectHidden = document.getElementById('connect-section').classList.contains('hidden');
+                    if (data.is_installed && !connectHidden) {
+                        window.location.reload(); 
+                    } else if (!data.is_installed && connectHidden) {
+                        document.getElementById('setup-section').classList.add('hidden');
+                        document.getElementById('connect-section').classList.remove('hidden');
+                    }
+                }
+            } catch (err) {}
+        }, 500);
+    });
 
-        // --- STEP 3: LOAD USER STATE (For the main tab only) --- update URL
-        // const res = await fetch('/auth/status', { credentials: 'include' });
+    try {
         const res = await fetch('http://127.0.0.1:8000/auth/status', { credentials: 'include' });
-        
-        // ... (the rest of your UI drawing logic stays exactly the same) ...
         if (res.ok) {
             const data = await res.json();
+            
+            // LOGGED IN: Show header, hide login!
             document.getElementById('login-section').classList.add('hidden');
             document.getElementById('user-name').innerText = data.username;
+            document.getElementById('profile-section').classList.remove('hidden');
             
-            // --- STEP 3: DRAW THE UI ---
             if (data.is_installed) {
-                // They installed it! Show the repos.
                 document.getElementById('setup-section').classList.remove('hidden');
+                document.getElementById('connect-section').classList.add('hidden');
                 fetchRepos(); 
             } else {
-                // Logged in, but haven't connected repos yet.
                 document.getElementById('connect-section').classList.remove('hidden');
-                document.getElementById('setup-section').classList.remove('hidden');
-                document.getElementById('repo-list').innerHTML = "<em>Please connect GitHub to see repositories.</em>";
+                document.getElementById('setup-section').classList.add('hidden');
             }
         } else {
+            // NOT LOGGED IN: Hide EVERYTHING except login!
             document.getElementById('login-section').classList.remove('hidden');
+            document.getElementById('profile-section').classList.add('hidden');
+            document.getElementById('connect-section').classList.add('hidden');
+            document.getElementById('setup-section').classList.add('hidden');
+            document.getElementById('chat-section').classList.add('hidden');
         }
     } catch (e) {
-        console.error("Initialization error:", e);
         document.getElementById('login-section').classList.remove('hidden');
+        document.getElementById('profile-section').classList.add('hidden');
+        document.getElementById('connect-section').classList.add('hidden');
+        document.getElementById('setup-section').classList.add('hidden');
+        document.getElementById('chat-section').classList.add('hidden');
     }
 };
-    
-    // 2. The API calls are now cleaner (No more 'Authorization' headers!)
-    async function fetchRepos() {
-        try {
-            //update URL . 
-            // const res = await fetch('/api/repos');  
-            // Inside your fetchRepos function:
-            const response = await fetch('http://127.0.0.1:8000/api/repos', {
-                method: 'GET',
-                credentials: 'include', // <--- YOU MUST ADD THIS
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            }); // The browser auto-attaches the cookie!
 
-            // if (response.status === 401) { return frontendLogout(); }  update :- removed infinite trap 
-
-            if (response.status === 401) { 
-            console.error("Not authorized to view repos.");
-            document.getElementById('repo-list').innerHTML = `
-                <div style="color: red;">Session expired. Please log out and log back in.</div>
-            `;
-            return; 
-        }
-            
-            const repos = await response.json();
-            console.log("Data from backend:", repos);
-            const repoListDiv = document.getElementById('repo-list');
-            repoListDiv.innerHTML = ''; 
-            
-            repos.forEach(repo => {
-                const btn = document.createElement('button');
-                btn.className = 'repo-btn';
-                btn.innerHTML = `<strong>${repo.name}</strong> ${repo.private ? '🔒' : '🌍'}`;
-                btn.onclick = () => startIngestion(repo.url);
-                repoListDiv.appendChild(btn);
-            });
-        } catch (err) {
-            document.getElementById('repo-list').innerText = "Failed to load repos.";
-        }
-    }
-
-    
-    async function startIngestion(repoUrl) {
-        const apiKey = document.getElementById('openai-key').value;
-        if (!apiKey) { alert('Please enter your OpenAI API key first.'); return; }
-
-        document.getElementById('setup-section').classList.add('hidden');
-        document.getElementById('loading-section').classList.remove('hidden');
-
-        const res = await fetch('/api/ingest', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }, // No Bearer token needed
-            body: JSON.stringify({ repo_url: repoUrl, openai_api_key: apiKey })
-        });
-        
-        if (res.status === 401) { return frontendLogout(); }
-        
-        const data = await res.json();
-        currentTaskId = data.task_id;
-        pollStatus();
-    }
-
-    // 3. Frontend Logout Flow
-    async function frontendLogout() {
-        // 1. We "await" the response so the browser doesn't kill the request
-        try {
-            if (typeof window.event !== 'undefined' && window.event) {
-            window.event.preventDefault();
-        }
-            //  update URL 
-            // const response = await fetch('/auth/logout', { method: 'POST' });
-            const response = await fetch('http://127.0.0.1:8000/auth/logout', {
-                method: 'POST',
-                credentials: 'include', 
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            });
-            
-            // 2. Once the server says "OK", then we move the user
-            if (response.ok) {
-                // Redirecting to "/" or "/login" is better than reload() 
-                // because it forces the page to see the "Logged Out" state.
-                window.location.href = "/"; 
-            }
-        } catch (err) {
-            console.error("Logout error:", err);
-            window.location.reload(); // Fallback
-        }
-    }
-
-
-    function waitForInstall(popupWindow) {
+function waitForInstall() {
     const connectSection = document.getElementById('connect-section');
-    const originalHTML = connectSection.innerHTML;
-
-    // 1. Show the Loading UI
     connectSection.innerHTML = `
         <h2>Waiting for GitHub...</h2>
         <p>Complete the installation in the new tab.</p>
         <div class="spinner"></div>
         <br><br>
-        <button class="secondary" onclick="window.location.reload()">Cancel / Go Back</button>
+        <button class="repo-btn" onclick="window.location.reload()" style="margin-top:20px;">Cancel / Go Back</button>
     `;
+    popupWindow = window.open('http://127.0.0.1:8000/auth/install', '_blank');
 
-    // 2. THE SUCCESS CATCHER (Polling)
-    const observer = setInterval(async () => {
+    authObserver = setInterval(async () => {
         try {
-            //update URL
-            // const res = await fetch('/auth/status', { credentials: 'include' });
             const res = await fetch('http://127.0.0.1:8000/auth/status', { credentials: 'include' });
             if (res.ok) {
                 const data = await res.json();
                 if (data.is_installed) {
-                    clearInterval(observer); // Stop polling!
-                    if (popupWindow && !popupWindow.closed) popupWindow.close(); // Clean up tab
-                    
+                    clearInterval(authObserver); 
+                    if (popupWindow && !popupWindow.closed) popupWindow.close(); 
                     connectSection.innerHTML = `<h2>✅ Connected! Loading repos...</h2><div class="spinner"></div>`;
                     setTimeout(() => window.location.reload(), 1500);
                 }
             }
-        } catch (err) {
-            console.error("Polling error:", err);
-        }
+        } catch (err) {}
     }, 1500);
-
-    // 3. THE CANCEL CATCHER (Focus Event)
-    // When the user closes the tab, their screen "focuses" back on the main window.
-    // 3. THE CANCEL (AND SNEAKY SUCCESS) CATCHER
-    window.addEventListener('focus', () => {
-        console.log("Main window focused. Checking status...");
-        
-        if (!popupWindow || popupWindow.closed) {
-            
-            // Wait 500ms for network stability
-            setTimeout(async () => {
-                try {
-                    const res = await fetch('http://127.0.0.1:8000/auth/status', { credentials: 'include' });
-                    if (res.ok) {
-                        const data = await res.json();
-                        
-                        if (data.is_installed) {
-                            // THE FIX: They successfully installed it while we weren't looking!
-                            console.log("Late installation detected! Updating UI.");
-                            clearInterval(observer); // Stop any lingering polling
-                            
-                            const connectSection = document.getElementById('connect-section');
-                            if (connectSection) {
-                                connectSection.innerHTML = `<h2>✅ Connected! Loading repos...</h2><div class="spinner"></div>`;
-                            }
-                            // Reload to show the dashboard
-                            setTimeout(() => window.location.reload(), 1500);
-
-                        } else {
-                            // They actually canceled. Kill polling and revert.
-                            console.log("Installation canceled. Reverting UI.");
-                            clearInterval(observer); 
-                            
-                            const connectSection = document.getElementById('connect-section');
-                            if (connectSection) {
-                                connectSection.innerHTML = originalHTML; 
-                            }
-                        }
-                    }
-                } catch (err) {
-                    clearInterval(observer);
-                    document.getElementById('connect-section').innerHTML = originalHTML;
-                }
-            }, 500);
-        }
-    });
 }
 
-    async function pollStatus() {
-        // update URL 
-        // const res = await fetch(`/api/status/${currentTaskId}`);
-        const res = await fetch(`http://127.0.0.1:8000/api/status/${currentTaskId}`); // Status is public, no token needed
-        const data = await res.json();
-        
-        if (data.status === 'completed') {
-            document.getElementById('loading-section').classList.add('hidden');
-            document.getElementById('chat-section').classList.remove('hidden');
-            appendMessage("System", "Knowledge graph built successfully. You can now chat with your code!", "ai-msg");
-        } else if (data.status.startsWith('failed')) {
-            document.getElementById('loading-status').innerHTML = `<span style="color:red;">Error: ${data.status}</span>`;
-        } else {
-            setTimeout(pollStatus, 2000);
+async function frontendLogout(event) {
+    if (event) event.preventDefault(); 
+    try {
+        await fetch('http://127.0.0.1:8000/auth/logout', { method: 'POST', credentials: 'include' });
+        window.location.reload(); 
+    } catch (e) { console.error("Logout failed", e); }
+}
+
+/* =========================================
+2. REPO DASHBOARD LOGIC
+========================================= */
+async function fetchRepos() {
+    try {
+        const response = await fetch('http://127.0.0.1:8000/api/repos', { method: 'GET', credentials: 'include' });
+
+        if (response.status === 401 || response.status === 403) {
+            document.getElementById('setup-section').classList.add('hidden');
+            document.getElementById('connect-section').classList.remove('hidden');
+            return;
         }
+
+        const repos = await response.json();
+        const repoListDiv = document.getElementById('repo-list');
+        repoListDiv.innerHTML = '';
+
+        repos.forEach(repo => {
+            const card = document.createElement('div');
+            card.className = 'repo-card';
+            card.innerHTML = `
+                <div class="repo-left">
+                    <div class="repo-icon">${repo.private ? '🔒' : '🌍'}</div>
+                    <div class="repo-content">
+                        <div class="repo-name">${repo.name}</div>
+                        <div class="repo-meta">
+                            ${repo.language || 'Unknown'} · ${repo.file_count || 0} files · ${repo.meta_text || ''}
+                        </div>
+                    </div>
+                </div>
+                <div class="repo-right">
+                    ${buildStatusBadge(repo)}
+                    ${buildActionButton(repo)}
+                </div>
+            `;
+            repoListDiv.appendChild(card);
+        });
+    } catch (err) {
+        document.getElementById('repo-list').innerHTML = `<div style="color:red; text-align:center;">Failed to load repositories.</div>`;
+    }
+}
+
+function buildStatusBadge(repo){
+    switch(repo.index_status){
+        case 'indexed': return `<div class="badge badge-indexed">✓ Indexed</div>`;
+        case 'stale': return `<div class="badge badge-stale">⚠ Stale</div>`;
+        case 'indexing': return `<div class="badge badge-indexing">Indexing</div><div class="progress"><div class="progress-bar"></div></div>`;
+        case 'paused': return `<div class="badge badge-paused">Setup paused</div>`;
+        case 'failed': return `<div class="badge badge-failed">Failed</div>`;
+        default: return `<div class="badge badge-not-indexed">Not indexed</div>`;
+    }
+}
+
+function buildActionButton(repo){
+    switch(repo.index_status){
+        case 'indexed': return `<button class="repo-btn" onclick="viewWiki('${repo.id}')">View wiki ↗</button>`;
+        case 'stale': return `<button class="repo-btn" onclick="reIndexRepo('${repo.id}')">Re-index ↗</button>`;
+        case 'paused': return `<button class="repo-btn" onclick="resumeSetup('${repo.id}')">Resume setup ↗</button>`;
+        case 'failed': return `<button class="repo-btn" onclick="retryRepo('${repo.id}')">Retry ↗</button>`;
+        case 'indexing': return `<div class="small-text">Processing...</div>`;
+        default: return `<button class="repo-btn" onclick="indexRepo('${repo.id}')">Index ↗</button>`;
+    }
+}
+
+/* =========================================
+3. ACTIONS & POLLING
+========================================= */
+async function indexRepo(repoId) {
+    const openaiKey = document.getElementById('openai-key').value.trim();
+    if (!openaiKey) {
+        alert("Please enter your OpenAI API key before indexing.");
+        document.getElementById('openai-key').focus();
+        return;
     }
 
-    async function sendMessage() {
-        const input = document.getElementById('chat-input');
-        const message = input.value.trim();
-        if (!message) return;
+    try{
+        await fetch('http://127.0.0.1:8000/repos/submit', {
+            method:'POST',
+            credentials:'include',
+            headers:{ 'Content-Type':'application/json' },
+            body:JSON.stringify({ repo_id: repoId, openai_key: openaiKey })
+        });
+        pollRepoStatus(repoId);
+    } catch(err){ console.error(err); }
+}
 
-        appendMessage("You", message, "user-msg");
-        input.value = '';
+async function retryRepo(repoId) {
+    const openaiKey = document.getElementById('openai-key').value.trim();
+    if (!openaiKey) {
+        alert("Please enter your OpenAI API key before retrying.");
+        document.getElementById('openai-key').focus();
+        return;
+    }
 
-        const aiMsgDiv = appendMessage("AI", "", "ai-msg");
+    try{
+        await fetch('http://127.0.0.1:8000/repos/submit', {
+            method:'POST',
+            credentials:'include',
+            headers:{ 'Content-Type':'application/json' },
+            body:JSON.stringify({ repo_id: repoId, force_refresh: true, openai_key: openaiKey })
+        });
+        pollRepoStatus(repoId);
+    } catch(err){ console.error(err); }
+}
 
+async function reIndexRepo(repoId){
+    try{
+        await fetch(`http://127.0.0.1:8000/repos/${repoId}/select/confirm`, { method:'POST', credentials:'include' });
+        pollRepoStatus(repoId);
+    }catch(err){}
+}
+
+async function resumeSetup(repoId){
+    try{ await fetch(`http://127.0.0.1:8000/repos/${repoId}/scout`, { method:'GET', credentials:'include' }); }catch(err){}
+}
+
+function viewWiki(repoId){ window.location.href = `/wiki/${repoId}`; }
+
+function pollRepoStatus(repoId) {
+    if (!repoId || repoId === 'undefined') return;
+    const interval = setInterval(async () => {
         try {
-            //update URL . 
-            const res = await fetch('/api/chat', {
-                method: 'POST',
-                headers: { 
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ task_id: currentTaskId, message: message })
-            });
+            const response = await fetch(`http://127.0.0.1:8000/repos/${repoId}/status`, { credentials: 'include' });
+            if (!response.ok) { clearInterval(interval); return; }
+            const data = await response.json();
+            if (data.status === 'indexed' || data.status === 'failed') {
+                clearInterval(interval);
+                fetchRepos(); 
+            }
+        } catch (err) { clearInterval(interval); }
+    }, 5000);
+}
 
-            if (res.status === 401) { frontendLogout(); return; }
+/* =========================================
+4. CHAT FUNCTIONS
+========================================= */
+async function sendMessage(){
+    const input = document.getElementById('chat-input');
+    const message = input.value.trim();
+    if(!message) return;
 
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
+    appendMessage("You", message, "user-msg");
+    input.value='';
+    const aiMsgDiv = appendMessage("AI", "", "ai-msg");
 
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                
-                const chunk = decoder.decode(value);
-                const lines = chunk.split('\n');
-                for (let line of lines) {
-                    if (line.startsWith('data: ')) {
-                        let text = line.replace('data: ', '');
-                        aiMsgDiv.innerHTML += text;
-                        scrollToBottom();
-                    }
+    try{
+        const res = await fetch('/api/chat', {
+            method:'POST',
+            headers:{ 'Content-Type':'application/json' },
+            body:JSON.stringify({ task_id:currentTaskId, message:message })
+        });
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        while(true){
+            const {done,value} = await reader.read();
+            if(done) break;
+            const chunk = decoder.decode(value);
+            const lines = chunk.split('\n');
+            for(let line of lines){
+                if(line.startsWith('data: ')){
+                    aiMsgDiv.innerHTML += line.replace('data: ','');
+                    scrollToBottom();
                 }
             }
-        } catch (err) {
-            aiMsgDiv.innerHTML += "<br><span style='color:red;'>Connection lost.</span>";
         }
+    }catch(err){
+        aiMsgDiv.innerHTML += `<br><span style='color:red;'>Connection lost.</span>`;
     }
+}
 
-    function appendMessage(sender, text, className) {
-        const box = document.getElementById('chat-box');
-        const msgDiv = document.createElement('div');
-        msgDiv.className = `msg ${className}`;
-        msgDiv.innerHTML = `<strong>${sender}:</strong> <span>${text}</span>`;
-        box.appendChild(msgDiv);
-        scrollToBottom();
-        return msgDiv.querySelector('span'); 
-    }
+function appendMessage(sender,text,className){
+    const box = document.getElementById('chat-box');
+    const msgDiv = document.createElement('div');
+    msgDiv.className = `msg ${className}`;
+    msgDiv.innerHTML = `<strong>${sender}:</strong> <span>${text}</span>`;
+    box.appendChild(msgDiv);
+    scrollToBottom();
+    return msgDiv.querySelector('span');
+}
 
-    function scrollToBottom() {
-        const box = document.getElementById('chat-box');
-        box.scrollTop = box.scrollHeight;
-    }
+function scrollToBottom(){
+    const box = document.getElementById('chat-box');
+    box.scrollTop = box.scrollHeight;
+}
 </script>
-
 </body>
 </html>
