@@ -85,3 +85,49 @@ async def list_branches(owner: str, repo: str, request: Request):
         raise HTTPException(status_code=500, detail=f"Failed to fetch branches: {str(e)}")
 
 
+@router.post("/repos/status")
+async def get_repos_status(
+    repo_names: list[str],   # ["myorg/repo1", "myorg/repo2"]
+    db: AsyncSession = Depends(get_db),
+):
+    rows = await db.execute(
+        select(Repository).where(
+            Repository.full_name.in_(repo_names)
+        )
+    )
+    repos = {r.full_name: r for r in rows.scalars()}
+
+    result = {}
+    for name in repo_names:
+        repo = repos.get(name)
+        if not repo:
+            result[name] = {"status": "never_indexed", "action": "index"}
+            continue
+
+        status = repo.status
+        if status == RepoStatus.READY:
+            # Check webhook-flagged staleness (DB only, no API call)
+            is_stale = (status == RepoStatus.STALE)
+            result[name] = {
+                "status": "stale" if is_stale else "ready",
+                "last_indexed_at": repo.last_ingested_at,
+                "last_indexed_sha": repo.last_ingested_sha,
+                "action": "reindex" if is_stale else "view",
+            }
+        elif status == RepoStatus.AWAITING_UI:
+            result[name] = {"status": "setup_paused", "action": "resume"}
+        elif status in (RepoStatus.CLONING, RepoStatus.FILTERING,
+                        RepoStatus.MANIFESTING, RepoStatus.SUBMODULES):
+            result[name] = {"status": "indexing", "action": "none"}
+        elif status == RepoStatus.FAILED:
+            result[name] = {"status": "failed", "action": "retry"}
+        elif status == RepoStatus.STALE:
+            result[name] = {
+                "status": "stale",
+                "commits_since": repo.stale_commit_count,
+                "action": "reindex",
+            }
+        else:
+            result[name] = {"status": "pending", "action": "none"}
+
+    return result
