@@ -222,7 +222,11 @@ async function frontendLogout(event) {
 ========================================= */
 async function fetchRepos() {
     try {
-        const response = await fetch('http://127.0.0.1:8000/api/repos', { method: 'GET', credentials: 'include' });
+        // 1. Fetch the raw list of repositories
+        const response = await fetch('http://127.0.0.1:8000/api/repos', { 
+            method: 'GET', 
+            credentials: 'include' 
+        });
 
         if (response.status === 401 || response.status === 403) {
             document.getElementById('setup-section').classList.add('hidden');
@@ -230,7 +234,41 @@ async function fetchRepos() {
             return;
         }
 
-        const repos = await response.json();
+        let repos = await response.json();
+
+        // 2. THE HYDRATION STEP: Fetch live statuses before drawing the UI!
+        const repoNames = repos.map(r => r.name);
+        
+        if (repoNames.length > 0) {
+            try {
+                const statusRes = await fetch('http://127.0.0.1:8000/api/repos/status', {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(repoNames)
+                });
+                
+                if (statusRes.ok) {
+                    const liveStatuses = await statusRes.json();
+                    
+                    // 3. Merge the live database status into the frontend repo data
+                    repos = repos.map(repo => {
+                        const liveData = liveStatuses[repo.name];
+                        if (liveData) {
+                            repo.index_status = liveData.status; // e.g., 'ready', 'never_indexed'
+                            repo.action = liveData.action;
+                            repo.commits_since = liveData.commits_since;
+                            repo.last_indexed_at = liveData.last_indexed_at;
+                        }
+                        return repo;
+                    });
+                }
+            } catch (statusErr) {
+                console.error("Failed to fetch live statuses. Falling back to default.", statusErr);
+            }
+        }
+
+        // 4. Draw the UI with the perfect, real-time data
         const repoListDiv = document.getElementById('repo-list');
         repoListDiv.innerHTML = '';
 
@@ -253,47 +291,70 @@ async function fetchRepos() {
                 </div>
             `;
             repoListDiv.appendChild(card);
+
+            // 5. THE RESUME TRIGGER: If they logged back in while a worker is still running, restart the poller!
+            if (repo.index_status === 'indexing' || repo.index_status === 'pending') {
+                pollRepoStatus(repo.name);
+            }
         });
+
     } catch (err) {
         document.getElementById('repo-list').innerHTML = `<div style="color:red; text-align:center;">Failed to load repositories.</div>`;
     }
 }
 
-function buildStatusBadge(repo){
-    // Using the exact status strings from your new FastAPI route
-    switch(repo.index_status){
+function buildStatusBadge(repo) {
+    let extraText = '';
+
+    switch(repo.index_status) {
         case 'ready': 
-            return `<div class="badge badge-indexed">✓ Ready</div>`;
+            // Add the "3 days ago" text if it exists
+            if (repo.last_indexed_at) {
+                extraText = `<span style="color:#8b949e; font-size:13px; margin-left:14px;">${repo.last_indexed_at}</span>`;
+            }
+            return `<div style="display:flex; align-items:center;"><div class="badge badge-indexed">✓ Indexed</div>${extraText}</div>`;
+            
         case 'stale': 
-            return `<div class="badge badge-stale">⚠ Stale</div>`;
+            // Add the "7 new commits" text using the yellow color from your design
+            if (repo.commits_since) {
+                extraText = `<span style="color:#d29922; font-size:13px; margin-left:14px; display:flex; align-items:center; gap:4px;">⎇ ${repo.commits_since} new commits</span>`;
+            }
+            return `<div style="display:flex; align-items:center;"><div class="badge badge-stale">◷ Stale</div>${extraText}</div>`;
+            
         case 'indexing': 
         case 'pending':
-            return `<div class="badge badge-indexing">Indexing</div><div class="progress"><div class="progress-bar"></div></div>`;
+            // Group the badge and progress bar together horizontally
+            return `<div style="display:flex; align-items:center; gap:12px;"><div class="badge badge-indexing">Indexing</div><div class="progress"><div class="progress-bar"></div></div></div>`;
+            
         case 'setup_paused': 
             return `<div class="badge badge-paused">Setup paused</div>`;
         case 'failed': 
-            return `<div class="badge badge-failed">Failed</div>`;
+            return `<div class="badge badge-failed">⚠ Failed</div>`;
         case 'never_indexed':
         default: 
             return `<div class="badge badge-not-indexed">Not indexed</div>`;
     }
 }
 
-function buildActionButton(repo){
-    // Routing the actions based on the new status strings
-    switch(repo.index_status){
-        case 'ready': 
-            return `<button class="repo-btn" onclick="viewWiki('${repo.name}')">View wiki ↗</button>`;
-        case 'stale': 
+function buildActionButton(repo) {
+    const currentAction = repo.action || 'index';
+
+    switch(currentAction) {
+        case 'view': 
+            // Styled perfectly as a blue text link to match the screenshot
+            return `<a href="#" onclick="viewWiki('${repo.name}'); return false;" style="color:#58a6ff; font-size:14px; font-weight:600; text-decoration:none; display:flex; align-items:center; gap:4px;">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M10.604 1h4.146a.25.25 0 0 1 .25.25v4.146a.25.25 0 0 1-.427.177L13.03 4.03 9.28 7.78a.75.75 0 0 1-1.06-1.06l3.75-3.75-1.543-1.543A.25.25 0 0 1 10.604 1ZM2.75 4.5a.25.25 0 0 0-.25.25v8.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25v-3.5a.75.75 0 0 1 1.5 0v3.5A1.75 1.75 0 0 1 11.25 15h-8.5A1.75 1.75 0 0 1 1 13.25v-8.5C1 3.567 2.007 2.75 3.25 2.75h3.5a.75.75 0 0 1 0 1.5h-3.5Z"></path></svg> 
+                View wiki
+            </a>`;
+        case 'reindex': 
             return `<button class="repo-btn" onclick="reIndexRepo('${repo.name}')">Re-index ↗</button>`;
-        case 'setup_paused': 
+        case 'resume': 
             return `<button class="repo-btn" onclick="resumeSetup('${repo.name}')">Resume setup ↗</button>`;
-        case 'failed': 
+        case 'retry': 
             return `<button class="repo-btn" onclick="retryRepo('${repo.name}')">Retry ↗</button>`;
-        case 'indexing': 
-        case 'pending':
-            return `<div class="small-text">Processing...</div>`;
-        case 'never_indexed':
+        case 'none': 
+            return ``; // When indexing, we just show the progress bar, no extra button needed
+        case 'index':
         default: 
             return `<button class="repo-btn" onclick="indexRepo('${repo.name}')">Index ↗</button>`;
     }
@@ -302,7 +363,10 @@ function buildActionButton(repo){
 /* =========================================
 3. ACTIONS & POLLING
 ========================================= */
-async function indexRepo(repoId) {
+/* =========================================
+3. ACTIONS & POLLING
+========================================= */
+async function indexRepo(repoName) {
     const openaiKey = document.getElementById('openai-key').value.trim();
     if (!openaiKey) {
         alert("Please enter your OpenAI API key before indexing.");
@@ -315,13 +379,16 @@ async function indexRepo(repoId) {
             method:'POST',
             credentials:'include',
             headers:{ 'Content-Type':'application/json' },
-            body:JSON.stringify({ repo_id: repoId, openai_key: openaiKey })
+            // THE FIX: Send repo_name instead of repo_id
+            body:JSON.stringify({ repo_name: repoName, openai_key: openaiKey })
         });
-        pollRepoStatus(repoId);
+        
+        // Trigger the poller with the name!
+        pollRepoStatus(repoName);
     } catch(err){ console.error(err); }
 }
 
-async function retryRepo(repoId) {
+async function retryRepo(repoName) {
     const openaiKey = document.getElementById('openai-key').value.trim();
     if (!openaiKey) {
         alert("Please enter your OpenAI API key before retrying.");
@@ -334,37 +401,43 @@ async function retryRepo(repoId) {
             method:'POST',
             credentials:'include',
             headers:{ 'Content-Type':'application/json' },
-            body:JSON.stringify({ repo_id: repoId, force_refresh: true, openai_key: openaiKey })
+            body:JSON.stringify({ repo_name: repoName, force_refresh: true, openai_key: openaiKey })
         });
-        pollRepoStatus(repoId);
+        pollRepoStatus(repoName);
     } catch(err){ console.error(err); }
 }
 
-async function reIndexRepo(repoId){
+async function reIndexRepo(repoName){
     try{
-        await fetch(`http://127.0.0.1:8000/repos/${repoId}/select/confirm`, { method:'POST', credentials:'include' });
-        pollRepoStatus(repoId);
+        // Notice the URL changed to use the string name!
+        await fetch(`http://127.0.0.1:8000/repos/${repoName}/select/confirm`, { method:'POST', credentials:'include' });
+        pollRepoStatus(repoName);
     }catch(err){}
 }
 
-async function resumeSetup(repoId){
-    try{ await fetch(`http://127.0.0.1:8000/repos/${repoId}/scout`, { method:'GET', credentials:'include' }); }catch(err){}
+async function resumeSetup(repoName){
+    try{ 
+        await fetch(`http://127.0.0.1:8000/repos/${repoName}/scout`, { method:'GET', credentials:'include' }); 
+    }catch(err){}
 }
 
-function viewWiki(repoId){ window.location.href = `/wiki/${repoId}`; }
+function viewWiki(repoName){ 
+    window.location.href = `/wiki/${repoName}`; 
+}
 
 function pollRepoStatus(repoName) {
-    // Note: Make sure what you are passing here matches the "myorg/repo1" format!
     if (!repoName || repoName === 'undefined') return;
-
-    const interval = setInterval(async () => {
+    // If this repo is already being polled, don't start a second one!
+    if (activePollers[repoName]) return;
+    // Save the interval to the dictionary
+    activePollers[repoName] = setInterval(async () => {
         try {
-            // 1. Changed to POST /repos/status
-            const response = await fetch(`http://127.0.0.1:8000/repos/status`, { 
+            // THE FIX: Swapped to a POST request expecting an array of names
+            const response = await fetch(`http://127.0.0.1:8000/api/repos/status`, { 
                 method: 'POST',
                 credentials: 'include',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify([repoName]) // 2. Send as an array of strings!
+                body: JSON.stringify([repoName])
             });
             
             if (!response.ok) { 
@@ -373,14 +446,13 @@ function pollRepoStatus(repoName) {
             }
             
             const data = await response.json();
-            
-            // 3. Extract the status dictionary for this specific repo
             const repoData = data[repoName];
+            
             if (!repoData) return; // Safeguard if backend returns empty
 
             const currentStatus = repoData.status;
 
-            // 4. Stop polling if the task is completely finished (using your new backend strings)
+            // Stop polling if the task hits a final state
             if (
                 currentStatus === 'ready' || 
                 currentStatus === 'failed' || 
@@ -388,12 +460,12 @@ function pollRepoStatus(repoName) {
                 currentStatus === 'setup_paused' ||
                 currentStatus === 'never_indexed'
             ) {
-                clearInterval(interval);
+                // THE FIX: Clean up the dictionary when finished
+                clearInterval(activePollers[repoName]);
+                delete activePollers[repoName];
                 fetchRepos(); // Redraw the UI!
             }
-        } catch (err) { 
-            clearInterval(interval); 
-        }
+        } catch (err) { clearInterval(interval); }
     }, 5000);
 }
 
