@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request
 from typing import List
 from src.services.github import GitHubService
-from src.db.mock_db import MOCK_DB
+from src.db.mock_db import MOCK_DB , MockRepository
 from src.models.database import RepoStatus
 
 # Notice: Because prefix="/api", your routes automatically become /api/repos
@@ -45,11 +45,24 @@ async def list_installed_repositories(request: Request):
                 "url": repo["html_url"],
                 "visibility":repo["visibility"],
                 "default_branch":repo["default_branch"],
-                "size":repo["size"],
+                "size":repo["size"]
             }
             for repo in raw_repos
         ]
-        
+        repo_table = MOCK_DB["repositories"]
+        for repo in formatted_repos:
+            if repo["name"] not in repo_table:
+                repo_table = MockRepository(
+
+                        full_name = repo["full_name"],
+                        private= repo["private"],
+                        url= repo["html_url"],
+                        visibility = repo["visibility"],
+                        default_branch = repo["default_branch"],
+                        size = repo["size"],
+                        status = None 
+                )
+
         return formatted_repos
         
     except Exception as e:
