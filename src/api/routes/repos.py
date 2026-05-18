@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Request
 from typing import List
 from src.services.github import GitHubService
 from src.db.mock_db import MOCK_DB
+from src.models.database import RepoStatus
 
 # Notice: Because prefix="/api", your routes automatically become /api/repos
 router = APIRouter(prefix="/api", tags=["Repositories"])
@@ -88,31 +89,43 @@ async def list_branches(owner: str, repo: str, request: Request):
 @router.post("/repos/status")
 async def get_repos_status(
     repo_names: list[str],   # ["myorg/repo1", "myorg/repo2"]
-    db: AsyncSession = Depends(get_db),
+    # db: AsyncSession = Depends(get_db),
 ):
-    rows = await db.execute(
-        select(Repository).where(
-            Repository.full_name.in_(repo_names)
-        )
-    )
-    repos = {r.full_name: r for r in rows.scalars()}
-
+    # result = await db.execute(
+    #     select(Repository).where(
+    #         Repository.full_name.in_(repo_names)
+    #     )
+    # )
+    # repos = {r.full_name: r for r in result.scalars().all()}
+    mock_repo_tables = MOCK_DB["repositories"]
     result = {}
     for name in repo_names:
-        repo = repos.get(name)
-        if not repo:
+        if name not in mock_repo_tables:
             result[name] = {"status": "never_indexed", "action": "index"}
             continue
-
+        
+        repo = mock_repo_tables[name]
         status = repo.status
-        if status == RepoStatus.READY:
+
+        if status is None:
+            result[name] = {"status": "never_indexed", "action": "index"}
+
+        elif status == RepoStatus.READY:
             # Check webhook-flagged staleness (DB only, no API call)
-            is_stale = (status == RepoStatus.STALE)
-            result[name] = {
-                "status": "stale" if is_stale else "ready",
-                "last_indexed_at": repo.last_ingested_at,
-                "last_indexed_sha": repo.last_ingested_sha,
-                "action": "reindex" if is_stale else "view",
+            if repo.is_stale:  # <--- Checked directly from your new DB column!
+                result[name] = {
+                    "status": "stale",
+                    "commits_since":repo.stale_commit_count,
+                    "last_indexed_at": repo.last_ingested_at,
+                    "last_indexed_sha": repo.last_ingested_sha,
+                    "action": "reindex",
+                }
+            else:
+                result[name] = {
+                    "status": "ready",
+                    "last_indexed_at": repo.last_ingested_at,
+                    "last_indexed_sha": repo.last_ingested_sha,
+                    "action": "view",
             }
         elif status == RepoStatus.AWAITING_UI:
             result[name] = {"status": "setup_paused", "action": "resume"}
