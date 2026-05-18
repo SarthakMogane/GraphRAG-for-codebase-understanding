@@ -260,24 +260,42 @@ async function fetchRepos() {
 }
 
 function buildStatusBadge(repo){
+    // Using the exact status strings from your new FastAPI route
     switch(repo.index_status){
-        case 'indexed': return `<div class="badge badge-indexed">✓ Indexed</div>`;
-        case 'stale': return `<div class="badge badge-stale">⚠ Stale</div>`;
-        case 'indexing': return `<div class="badge badge-indexing">Indexing</div><div class="progress"><div class="progress-bar"></div></div>`;
-        case 'paused': return `<div class="badge badge-paused">Setup paused</div>`;
-        case 'failed': return `<div class="badge badge-failed">Failed</div>`;
-        default: return `<div class="badge badge-not-indexed">Not indexed</div>`;
+        case 'ready': 
+            return `<div class="badge badge-indexed">✓ Ready</div>`;
+        case 'stale': 
+            return `<div class="badge badge-stale">⚠ Stale</div>`;
+        case 'indexing': 
+        case 'pending':
+            return `<div class="badge badge-indexing">Indexing</div><div class="progress"><div class="progress-bar"></div></div>`;
+        case 'setup_paused': 
+            return `<div class="badge badge-paused">Setup paused</div>`;
+        case 'failed': 
+            return `<div class="badge badge-failed">Failed</div>`;
+        case 'never_indexed':
+        default: 
+            return `<div class="badge badge-not-indexed">Not indexed</div>`;
     }
 }
 
 function buildActionButton(repo){
+    // Routing the actions based on the new status strings
     switch(repo.index_status){
-        case 'indexed': return `<button class="repo-btn" onclick="viewWiki('${repo.id}')">View wiki ↗</button>`;
-        case 'stale': return `<button class="repo-btn" onclick="reIndexRepo('${repo.id}')">Re-index ↗</button>`;
-        case 'paused': return `<button class="repo-btn" onclick="resumeSetup('${repo.id}')">Resume setup ↗</button>`;
-        case 'failed': return `<button class="repo-btn" onclick="retryRepo('${repo.id}')">Retry ↗</button>`;
-        case 'indexing': return `<div class="small-text">Processing...</div>`;
-        default: return `<button class="repo-btn" onclick="indexRepo('${repo.id}')">Index ↗</button>`;
+        case 'ready': 
+            return `<button class="repo-btn" onclick="viewWiki('${repo.name}')">View wiki ↗</button>`;
+        case 'stale': 
+            return `<button class="repo-btn" onclick="reIndexRepo('${repo.name}')">Re-index ↗</button>`;
+        case 'setup_paused': 
+            return `<button class="repo-btn" onclick="resumeSetup('${repo.name}')">Resume setup ↗</button>`;
+        case 'failed': 
+            return `<button class="repo-btn" onclick="retryRepo('${repo.name}')">Retry ↗</button>`;
+        case 'indexing': 
+        case 'pending':
+            return `<div class="small-text">Processing...</div>`;
+        case 'never_indexed':
+        default: 
+            return `<button class="repo-btn" onclick="indexRepo('${repo.name}')">Index ↗</button>`;
     }
 }
 
@@ -335,18 +353,47 @@ async function resumeSetup(repoId){
 
 function viewWiki(repoId){ window.location.href = `/wiki/${repoId}`; }
 
-function pollRepoStatus(repoId) {
-    if (!repoId || repoId === 'undefined') return;
+function pollRepoStatus(repoName) {
+    // Note: Make sure what you are passing here matches the "myorg/repo1" format!
+    if (!repoName || repoName === 'undefined') return;
+
     const interval = setInterval(async () => {
         try {
-            const response = await fetch(`http://127.0.0.1:8000/repos/${repoId}/status`, { credentials: 'include' });
-            if (!response.ok) { clearInterval(interval); return; }
-            const data = await response.json();
-            if (data.status === 'indexed' || data.status === 'failed') {
-                clearInterval(interval);
-                fetchRepos(); 
+            // 1. Changed to POST /repos/status
+            const response = await fetch(`http://127.0.0.1:8000/repos/status`, { 
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify([repoName]) // 2. Send as an array of strings!
+            });
+            
+            if (!response.ok) { 
+                clearInterval(interval); 
+                return; 
             }
-        } catch (err) { clearInterval(interval); }
+            
+            const data = await response.json();
+            
+            // 3. Extract the status dictionary for this specific repo
+            const repoData = data[repoName];
+            if (!repoData) return; // Safeguard if backend returns empty
+
+            const currentStatus = repoData.status;
+
+            // 4. Stop polling if the task is completely finished (using your new backend strings)
+            if (
+                currentStatus === 'ready' || 
+                currentStatus === 'failed' || 
+                currentStatus === 'stale' ||
+                currentStatus === 'setup_paused' ||
+                currentStatus === 'never_indexed'
+            ) {
+                clearInterval(interval);
+                fetchRepos(); // Redraw the UI!
+            }
+        } catch (err) { 
+            clearInterval(interval); 
+        }
     }, 5000);
 }
 
