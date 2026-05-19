@@ -336,23 +336,23 @@ class GitHubService:
             ) for entry in data.get("tree", [])
         ]
     
-    # @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
-    # async def get_live_head_sha(self, owner:str, repo:str,branch:str, installation_id:int ):
-    #     """
-    #     fetchs live head sha 
-    #     """
-    #     resp = self._get_as_app(f"/repos/{owner}/{repo}/git/ref/heads/{branch}",
-    #                      installation_id)
-    #     return resp.json()
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+    async def get_live_head_sha(self, owner:str, repo:str,branch:str, installation_id:int ):
+        """
+        fetchs live head sha 
+        """
+        resp = self._get_as_app(f"/repos/{owner}/{repo}/git/ref/heads/{branch}",
+                         installation_id)
+        return resp.json()
     
-    # @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
-    # async def get_commit_count(self,owner: str,repo: str,since_sha: str,branch: str, installation_id:int, params:dict):
-    #     """ get commit count since last sha """
-    #     resp = self._get_as_app( 
-    #             f"https://api.github.com/repos/{owner}/{repo}/compare/"
-    #             f"{since_sha}...{branch}",
-    #             installation_id ,
-    #             params)
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+    async def get_commit_count(self,owner: str,repo: str,since_sha: str,branch: str, installation_id:int, params:dict):
+        """ get commit count since last sha """
+        resp = self._get_as_app( 
+                f"https://api.github.com/repos/{owner}/{repo}/compare/"
+                f"{since_sha}...{branch}",
+                installation_id ,
+                params)
         
     # ── Webhook Payload Validation ────────────────────────────────────────────
 
