@@ -37,6 +37,7 @@ class ValidationVerdict(str, enum.Enum):
     APPROVED             = "approved"
     REPO_NOT_FOUND       = "repo_not_found"
     REPO_PRIVATE         = "repo_private"
+    REPO_PUBLIC          = "repo_public"
     REPO_ARCHIVED        = "repo_archived"
     REPO_DISABLED        = "repo_disabled"
     REPO_EMPTY           = "repo_empty"
@@ -244,5 +245,4 @@ class MonorepoDetectionResult:
     @property
     def total_subproject_count(self) -> int:
         return len(self.all_subprojects)
-    
     
