@@ -38,13 +38,11 @@ async def check_rate_limit(gh ,installation_id) -> RateLimitStatus:
     """
     try:
             resp = await gh.fetch_rate_limit(installation_id)
-            resp.raise_for_status()
-            core = resp.json()
 
-            remaining = core["remaining"]
-            limit     = core["limit"]
-            reset_ts  = core["reset"]
-            used      = core["used"]
+            remaining = resp["remaining"]
+            limit     = resp["limit"]
+            reset_ts  = resp["reset"]
+            used      = resp["used"]
 
             status = RateLimitStatus(
                 remaining=remaining,

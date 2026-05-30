@@ -26,7 +26,7 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
-
+import asyncio
 from src.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -142,7 +142,7 @@ class GitHubAuthManager:
         }
         
         # Ensure newlines in the .env private key are formatted correctly
-        private_key = settings.GITHUB_PRIVATE_KEY.replace("\\n", "\n")
+        private_key = settings.GITHUB_APP_PRIVATE_KEY.replace("\\n", "\n")
         
         return jwt.encode(payload, private_key, algorithm="RS256")
 
@@ -224,6 +224,7 @@ class GitHubService:
         }
         return await self._execute_request(path, headers, params)
 
+# update : httpx timeouts configured globally or not.
     async def _execute_request(self, path: str, headers: dict, params: dict = None) -> dict:
         """Internal method to handle rate limits and request execution."""
         resp = await self.client.get(path, headers=headers, params=params or {})
@@ -248,7 +249,7 @@ class GitHubService:
                 installation_id
             )
 
-            return resp.json()["resources"]["core"] 
+            return resp["resources"]["core"] 
         except httpx.HTTPError as e:
             logger.error("GitHub API network failure during rate limit check: %s", e)
             raise
@@ -271,6 +272,12 @@ class GitHubService:
 
 
     # ── App API Calls (Installation Token) ────────────────────────────────────
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+    async def get_installation_for_owner(self, endpoint:str ,installation_id:str):
+        """installation for owner for installation cache class """
+        data = await self._get_as_app(endpoint,installation_id)
+        return data
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
     async def get_repo_branches(self, owner: str, repo: str, installation_id: int) -> list[str]:
@@ -353,11 +360,14 @@ class GitHubService:
                 f"{since_sha}...{branch}",
                 installation_id ,
                 params)
-        
+        return resp.json()
+
+    async def get_file_content():
+        pass   
     # ── Webhook Payload Validation ────────────────────────────────────────────
 
     @staticmethod
-    def validate_webhook_signature(payload_bytes: bytes, signature_header: str) -> bool:
+    async def validate_webhook_signature(payload_bytes: bytes, signature_header: str) -> bool:
         """
         Validate the X-Hub-Signature-256 header on incoming webhook payloads.
         Rejects any payload not signed by our webhook secret.
@@ -373,3 +383,79 @@ class GitHubService:
         
         received = signature_header[len("sha256="):]
         return hmac.compare_digest(expected, received)
+    
+
+# ── Installation Cache ────────────────────────────────────────────────────────
+# Paste this class into github_service.py after the GitHubAuthManager class.
+# Used by DeepScout and SubmoduleDecisionTree — pass ONE instance to both
+# so org-level installation lookups are never repeated across phases.
+
+class InstallationCache:
+    """
+    Caches GitHub App installation lookups per org/user for one run.
+
+    Problem: a repo with 8 submodules all owned by "myorg" would make
+    8 identical API calls to check if the app is installed on that org.
+    This cache makes it 1.
+
+    Usage:
+        cache = InstallationCache(gh, installation_id=user_install_id)
+        # Pass to both DeepScout and SubmoduleDecisionTree
+        scout = DeepScout(..., install_cache=cache)
+        tree  = SubmoduleDecisionTree(..., installation_cache=cache)
+    """
+
+    def __init__(self, gh: "GitHubService", installation_id: int):
+        self._gh              = gh
+        self._installation_id = installation_id
+        # { owner_login_lower → installation_id_int_or_None }
+        self._cache: dict[str, Optional[int]] = {}
+        self.call_count = 0   # Tracked for transparency in scout telemetry
+        self._locks: dict[str,asyncio.Lock] ={}
+
+    async def get(self, owner: str) -> Optional[int]:
+        """
+        Return the GitHub App installation ID covering this org/user,
+        or None if the app is not installed there.
+        """
+        key = owner.lower()
+        if key in self._cache:
+            return self._cache[key]
+        
+        lock = self._locks.setdefault(key,asyncio.Lock())
+
+        async with lock:
+            if key in self._cache():
+                return self._cache
+            
+            result = await self._fetch(owner)
+            self._cache[key] = result
+            return result
+
+    async def _fetch(self, owner: str) -> Optional[int]:
+        """
+        Check org installation endpoint first, then user/personal account.
+        Uses the known installation_id to authenticate — we're checking
+        whether the app is installed on a DIFFERENT org, not the same one.
+        """
+        self.call_count += 1
+        for endpoint in (
+            f"/orgs/{owner}/installation",
+            f"/users/{owner}/installation",
+        ):
+            try:
+                data = await self._gh.get_installation_for_owner(endpoint, self._installation_id)
+                install_id = data.get("id")
+                logger.info(
+                    "App installed on '%s' — installation_id=%s", owner, install_id
+                )
+                return install_id
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    continue   # Not installed there, try next endpoint
+                logger.warning(
+                    "Unexpected status checking installation for '%s': %s",
+                    owner, e.response.status_code,
+                )
+        logger.info("App NOT installed on '%s'", owner)
+        return None
