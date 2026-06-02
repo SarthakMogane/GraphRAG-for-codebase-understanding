@@ -190,11 +190,11 @@ class DeepScout:
         meta_task = asyncio.create_task(
             self.gh.get_repo_metadata(owner, repo, self.installation_id)
         )
-        # root_task = asyncio.create_task(
-        #     self.gh.get_root_files(owner, repo, branch, self.installation_id)
-        # )
-        # metadata, root_files = await asyncio.gather(meta_task, root_task)
-        # self._api_calls += 2
+        root_task = asyncio.create_task(
+            self.gh.get_root_files(owner, repo, branch, self.installation_id)
+        )
+        metadata, root_files = await asyncio.gather(meta_task, root_task)
+        self._api_calls += 2
 
 #         # ── Monorepo detection + Level 1 submodule scout in parallel ──────────
 #         mono_task = asyncio.create_task(
