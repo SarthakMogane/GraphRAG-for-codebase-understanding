@@ -15,7 +15,7 @@ GitHub REST API limits:
 This module fetches /rate_limit which does NOT count against the primary limit.
 """
 
-import logging
+from src.core.logger import get_logger
 from datetime import datetime, timezone
 
 import httpx
@@ -23,7 +23,7 @@ import httpx
 from src.core.config import get_settings
 from src.services.pre_clone.types import RateLimitStatus
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 settings = get_settings()
 
 
