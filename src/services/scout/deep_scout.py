@@ -57,22 +57,22 @@ settings = get_settings()
 # Result data structures — map 1:1 to the frontend checklist
 # ─────────────────────────────────────────────────────────────────────────────
 
-# @dataclass
-# class SubprojectNode:
-#     """
-#     One package/app/lib inside a monorepo.
-#     Rendered as a checkbox row with a score badge in the Phase 2 UI.
-#     auto_selected = True means the checkbox is pre-checked.
-#     """
-#     path: str
-#     name: str
-#     score: float
-#     auto_selected: bool
-#     source_file_count: int
-#     has_entry_point: bool
-#     dependent_count: int
-#     recent_commit_count: int
-#     skip_reason: Optional[str] = None
+@dataclass
+class SubprojectNode:
+    """
+    One package/app/lib inside a monorepo.
+    Rendered as a checkbox row with a score badge in the Phase 2 UI.
+    auto_selected = True means the checkbox is pre-checked.
+    """
+    path: str
+    name: str
+    score: float
+    auto_selected: bool
+    source_file_count: int
+    has_entry_point: bool
+    dependent_count: int
+    recent_commit_count: int
+    skip_reason: Optional[str] = None
 
 
 # @dataclass
@@ -196,14 +196,14 @@ class DeepScout:
         metadata, root_files = await asyncio.gather(meta_task, root_task)
         self._api_calls += 2
 
-#         # ── Monorepo detection + Level 1 submodule scout in parallel ──────────
-#         mono_task = asyncio.create_task(
-#             self._detect_monorepo(owner, repo, branch, root_files)
-#         )
-#         sub_task = asyncio.create_task(
-#             self._scout_submodules(owner, repo, branch, root_files, depth=1)
-#         )
-#         mono_result, submodule_nodes = await asyncio.gather(mono_task, sub_task)
+        # ── Monorepo detection + Level 1 submodule scout in parallel ──────────
+        mono_task = asyncio.create_task(
+            self._detect_monorepo(owner, repo, branch, root_files)
+        )
+        sub_task = asyncio.create_task(
+            self._scout_submodules(owner, repo, branch, root_files, depth=1)
+        )
+        mono_result, submodule_nodes = await asyncio.gather(mono_task, sub_task)
 
 #         subproject_nodes = self._build_subproject_nodes(mono_result)
 #         edges = self._build_dependency_edges(owner, repo, submodule_nodes, mono_result)
