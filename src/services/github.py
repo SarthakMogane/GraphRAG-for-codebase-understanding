@@ -130,6 +130,7 @@ class GitHubAuthManager:
     def __init__(self, http_client: httpx.AsyncClient):
         self.client = http_client
         # Cache format: { installation_id: (token, expires_at_timestamp) }
+        #update: Redis cache.
         self._installation_tokens: dict[int, tuple[str, float]] = {}
 
     def _generate_jwt(self) -> str:
@@ -158,6 +159,7 @@ class GitHubAuthManager:
         """
         now = time.time()
         
+        #update save the token in redis or db not in self 
         # Check if we have a valid cached token for this specific installation
         if installation_id in self._installation_tokens:
             token, expires_at = self._installation_tokens[installation_id]
@@ -317,11 +319,11 @@ class GitHubService:
         )
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
-    async def _get_root_file_list(self, owner: str, repo: str, branch: str, installation_id: int) -> set[str]:
-        "return the root file list."
+    async def _get_root_file_list(self, owner: str, repo: str, branch: str, installation_id: int, params: dict = None) -> set[str]:
+        """Returns the root file list as a set of paths."""
         if not branch:
             return set()
-        data = await self._get_as_app(f"/repos/{owner}/{repo}/git/trees/{branch}", installation_id)
+        data = await self._get_as_app(f"/repos/{owner}/{repo}/git/trees/{branch}", installation_id, params)
         return {entry["path"] for entry in data.get("tree", [])}
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
@@ -344,26 +346,40 @@ class GitHubService:
         ]
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
-    async def get_live_head_sha(self, owner:str, repo:str,branch:str, installation_id:int ):
+    async def get_live_head_sha(self, owner: str, repo: str, branch: str, installation_id: int) -> Optional[str]:
         """
-        fetchs live head sha 
+        Fetches live head SHA for cache invalidation.
         """
-        resp = self._get_as_app(f"/repos/{owner}/{repo}/git/ref/heads/{branch}",
-                         installation_id)
-        return resp.json()
+        try:
+            data = await self._get_as_app(
+                f"/repos/{owner}/{repo}/git/ref/heads/{branch}",
+                installation_id
+            )
+            return data.get("object", {}).get("sha")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return None
+            raise
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
-    async def get_commit_count(self,owner: str,repo: str,since_sha: str,branch: str, installation_id:int, params:dict):
-        """ get commit count since last sha """
-        resp = self._get_as_app( 
-                f"https://api.github.com/repos/{owner}/{repo}/compare/"
-                f"{since_sha}...{branch}",
-                installation_id ,
-                params)
-        return resp.json()
+    async def get_commit_count(self, owner: str, repo: str, since_sha: str, branch: str, installation_id: int, params: dict = None) -> int:
+        """Gets commit count since last sha to determine repo churn."""
+        data = await self._get_as_app( 
+            f"/repos/{owner}/{repo}/compare/{since_sha}...{branch}",
+            installation_id,
+            params
+        )
+        return data.get("total_commits", 0)
 
-    async def get_file_content():
-        pass   
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+    async def get_file_content(self, owner: str, repo: str, path: str, installation_id: int, params: dict = None) -> dict:
+        """Fetches raw file dictionary payload from GitHub Contents API."""
+        data = await self._get_as_app(
+            f"/repos/{owner}/{repo}/contents/{path}",
+            installation_id,
+            params=params
+        )
+        return data
     # ── Webhook Payload Validation ────────────────────────────────────────────
 
     @staticmethod
