@@ -75,71 +75,71 @@ class SubprojectNode:
     skip_reason: Optional[str] = None
 
 
-# @dataclass
-# class SubmoduleNode:
-#     """
-#     One entry from .gitmodules — fully resolved and classified.
+@dataclass
+class SubmoduleNode:
+    """
+    One entry from .gitmodules — fully resolved and classified.
 
-#     user_can_toggle:
-#       depth=1 → True  → user sees a checkbox
-#       depth=2 → False → system auto-decides via B3 score, no UI toggle
+    user_can_toggle:
+      depth=1 → True  → user sees a checkbox
+      depth=2 → False → system auto-decides via B3 score, no UI toggle
 
-#     action_required:
-#       True when outcome=INSTALL_REQUIRED
-#       Frontend shows a "Grant Access to {org}" button instead of a checkbox
-#     """
-#     path: str
-#     name: str
-#     resolved_owner: Optional[str]
-#     resolved_repo: Optional[str]
-#     resolved_url: Optional[str]
-#     pinned_sha: Optional[str]
-#     outcome: SubmoduleOutcome
-#     is_private: Optional[bool]
-#     depth: int
-#     auto_selected: bool
-#     user_can_toggle: bool
-#     action_required: bool
-#     action_label: Optional[str]
-#     action_url: Optional[str]
-#     skip_reason: Optional[str]
-#     is_monorepo: bool = False
-#     monorepo_tooling: Optional[str] = None
-#     subprojects: list[SubprojectNode] = field(default_factory=list)
-#     nested_submodules: list[SubmoduleNode] = field(default_factory=list)
-#     complexity_band: Optional[str] = None
-#     estimated_source_files: int = 0
-#     linked_repo_id: Optional[int] = None
+    action_required:
+      True when outcome=INSTALL_REQUIRED
+      Frontend shows a "Grant Access to {org}" button instead of a checkbox
+    """
+    path: str
+    name: str
+    resolved_owner: Optional[str]
+    resolved_repo: Optional[str]
+    resolved_url: Optional[str]
+    pinned_sha: Optional[str]
+    outcome: SubmoduleOutcome
+    is_private: Optional[bool]
+    depth: int
+    auto_selected: bool
+    user_can_toggle: bool
+    action_required: bool
+    action_label: Optional[str]
+    action_url: Optional[str]
+    skip_reason: Optional[str]
+    is_monorepo: bool = False
+    monorepo_tooling: Optional[str] = None
+    subprojects: list[SubprojectNode] = field(default_factory=list)
+    nested_submodules: list[SubmoduleNode] = field(default_factory=list)
+    complexity_band: Optional[str] = None
+    estimated_source_files: int = 0
+    linked_repo_id: Optional[int] = None
 
 
-# @dataclass
-# class RepoScoutResult:
-#     """
-#     Complete Phase 1 output. Single contract between backend and frontend.
+@dataclass
+class RepoScoutResult:
+    """
+    Complete Phase 1 output. Single contract between backend and frontend.
 
-#     - Frontend renders this as the nested checklist (Phase 2 UI)
-#     - Stored in repo_scout_results table (keyed by repo_id + head_sha)
-#     - ingestion_task reads approved_dirs and selected_submodules from it
-#     - Never re-computed if head_sha hasn't changed (cache hit → instant)
-#     """
-#     owner: str
-#     repo: str
-#     default_branch: str
-#     github_id: int
-#     size_kb: int
-#     primary_language: Optional[str]
-#     is_monorepo: bool
-#     monorepo_tooling: Optional[str]
-#     subprojects: list[SubprojectNode]
-#     submodules: list[SubmoduleNode]
-#     dependency_edges: list[dict]
-#     total_submodules: int
-#     private_accessible: int
-#     install_required: int
-#     public_skipped: int
-#     auto_selected_count: int
-#     scout_duration_ms: int
-#     api_calls_made: int
+    - Frontend renders this as the nested checklist (Phase 2 UI)
+    - Stored in repo_scout_results table (keyed by repo_id + head_sha)
+    - ingestion_task reads approved_dirs and selected_submodules from it
+    - Never re-computed if head_sha hasn't changed (cache hit → instant)
+    """
+    owner: str
+    repo: str
+    default_branch: str
+    github_id: int
+    size_kb: int
+    primary_language: Optional[str]
+    is_monorepo: bool
+    monorepo_tooling: Optional[str]
+    subprojects: list[SubprojectNode]
+    submodules: list[SubmoduleNode]
+    dependency_edges: list[dict]
+    total_submodules: int
+    private_accessible: int
+    install_required: int
+    public_skipped: int
+    auto_selected_count: int
+    scout_duration_ms: int
+    api_calls_made: int
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -191,7 +191,7 @@ class DeepScout:
             self.gh.get_repo_metadata(owner, repo, self.installation_id)
         )
         root_task = asyncio.create_task(
-            self.gh.get_root_files(owner, repo, branch, self.installation_id)
+            self.gh._get_root_file_list(owner, repo, branch, self.installation_id)
         )
         metadata, root_files = await asyncio.gather(meta_task, root_task)
         self._api_calls += 2
@@ -205,136 +205,136 @@ class DeepScout:
         )
         mono_result, submodule_nodes = await asyncio.gather(mono_task, sub_task)
 
-#         subproject_nodes = self._build_subproject_nodes(mono_result)
-#         edges = self._build_dependency_edges(owner, repo, submodule_nodes, mono_result)
-#         all_flat = self._flatten_submodules(submodule_nodes)
+        subproject_nodes = self._build_subproject_nodes(mono_result)
+        edges = self._build_dependency_edges(owner, repo, submodule_nodes, mono_result)
+        all_flat = self._flatten_submodules(submodule_nodes)
 
-#         INDEXED_OUTCOMES = {
-#             SubmoduleOutcome.PRIVATE_FULL,
-#             SubmoduleOutcome.PRIVATE_MONOREPO,
-#             SubmoduleOutcome.PRIVATE_QUEUED,
-#             SubmoduleOutcome.PRIVATE_CROSS_LINK,
-#         }
+        INDEXED_OUTCOMES = {
+            SubmoduleOutcome.PRIVATE_FULL,
+            SubmoduleOutcome.PRIVATE_MONOREPO,
+            SubmoduleOutcome.PRIVATE_QUEUED,
+            SubmoduleOutcome.PRIVATE_CROSS_LINK,
+        }
 
-#         elapsed_ms = int((time.monotonic() - start) * 1000)
+        elapsed_ms = int((time.monotonic() - start) * 1000)
 
-#         return RepoScoutResult(
-#             owner=owner,
-#             repo=repo,
-#             default_branch=branch,
-#             github_id=metadata.github_id,
-#             size_kb=metadata.size_kb,
-#             primary_language=metadata.primary_language,
-#             is_monorepo=mono_result.is_monorepo if mono_result else False,
-#             monorepo_tooling=(
-#                 mono_result.tooling.value
-#                 if mono_result and mono_result.is_monorepo else None
-#             ),
-#             subprojects=subproject_nodes,
-#             submodules=submodule_nodes,
-#             dependency_edges=edges,
-#             total_submodules=len(all_flat),
-#             private_accessible=sum(1 for s in all_flat if s.outcome in INDEXED_OUTCOMES),
-#             install_required=sum(
-#                 1 for s in all_flat if s.outcome == SubmoduleOutcome.INSTALL_REQUIRED
-#             ),
-#             public_skipped=sum(
-#                 1 for s in all_flat if s.outcome == SubmoduleOutcome.PUBLIC_SKIPPED
-#             ),
-#             auto_selected_count=(
-#                 sum(1 for s in all_flat if s.auto_selected) +
-#                 sum(1 for sp in subproject_nodes if sp.auto_selected)
-#             ),
-#             scout_duration_ms=elapsed_ms,
-#             api_calls_made=self._api_calls + self.install_cache.call_count,
-#         )
+        return RepoScoutResult(
+            owner=owner,
+            repo=repo,
+            default_branch=branch,
+            github_id=metadata.github_id,
+            size_kb=metadata.size_kb,
+            primary_language=metadata.primary_language,
+            is_monorepo=mono_result.is_monorepo if mono_result else False,
+            monorepo_tooling=(
+                mono_result.tooling.value
+                if mono_result and mono_result.is_monorepo else None
+            ),
+            subprojects=subproject_nodes,
+            submodules=submodule_nodes,
+            dependency_edges=edges,
+            total_submodules=len(all_flat),
+            private_accessible=sum(1 for s in all_flat if s.outcome in INDEXED_OUTCOMES),
+            install_required=sum(
+                1 for s in all_flat if s.outcome == SubmoduleOutcome.INSTALL_REQUIRED
+            ),
+            public_skipped=sum(
+                1 for s in all_flat if s.outcome == SubmoduleOutcome.PUBLIC_SKIPPED
+            ),
+            auto_selected_count=(
+                sum(1 for s in all_flat if s.auto_selected) +
+                sum(1 for sp in subproject_nodes if sp.auto_selected)
+            ),
+            scout_duration_ms=elapsed_ms,
+            api_calls_made=self._api_calls + self.install_cache.call_count,
+        )
 
-#     # ─────────────────────────────────────────────────────────────────────────
-#     # Submodule scouting
-#     # ─────────────────────────────────────────────────────────────────────────
+    # # ─────────────────────────────────────────────────────────────────────────
+    # # Submodule scouting
+    # # ─────────────────────────────────────────────────────────────────────────
 
-#     async def _scout_submodules(
-#         self,
-#         owner: str,
-#         repo: str,
-#         branch: str,
-#         root_files: set[str],
-#         depth: int,
-#     ) -> list[SubmoduleNode]:
-#         """
-#         Fetch and classify all submodules for a repo via API.
-#         All sibling submodules are classified concurrently.
-#         Uses GitHubService.get_file_content() — no raw httpx calls.
-#         """
-#         if ".gitmodules" not in root_files:
-#             return []
+    # async def _scout_submodules(
+    #     self,
+    #     owner: str,
+    #     repo: str,
+    #     branch: str,
+    #     root_files: set[str],
+    #     depth: int,
+    # ) -> list[SubmoduleNode]:
+    #     """
+    #     Fetch and classify all submodules for a repo via API.
+    #     All sibling submodules are classified concurrently.
+    #     Uses GitHubService.get_file_content() — no raw httpx calls.
+    #     """
+    #     if ".gitmodules" not in root_files:
+    #         return []
 
-#         gitmodules_content = await self.gh.get_file_content(
-#             owner, repo, ".gitmodules", branch, self.installation_id
-#         )
-#         self._api_calls += 1
+    #     gitmodules_content = await self.gh.get_file_content(
+    #         owner, repo, ".gitmodules", branch, self.installation_id
+    #     )
+    #     self._api_calls += 1
 
-#         if not gitmodules_content:
-#             return []
+    #     if not gitmodules_content:
+    #         return []
           
-#         # Use the production GitmodulesParser (configparser-based, size-limited)
-#         from src.services.pre_clone.submodule_decision_tree import GitmodulesParser
-#         if len(gitmodules_content.encode()) > GitmodulesParser.MAX_GITMODULES_SIZE:
-#             return [] 
+    #     # Use the production GitmodulesParser (configparser-based, size-limited)
+    #     from src.services.scout.submodule_decision_tree import GitmodulesParser
+    #     if len(gitmodules_content.encode()) > GitmodulesParser.MAX_GITMODULES_SIZE:
+    #         return [] 
         
-#         entries = GitmodulesParser().parse(gitmodules_content)
+    #     entries = GitmodulesParser().parse(gitmodules_content)
 
-#         if not entries.is_valid_url:
-#             return SubmoduleNode(
-#                 path=entries.path,
-#                 name=entries.name,
+    #     if not entries.is_valid_url:
+    #         return SubmoduleNode(
+    #             path=entries.path,
+    #             name=entries.name,
 
-#                 resolved_owner=None,
-#                 resolved_repo=None,
-#                 resolved_url=None,
-#                 pinned_sha=None,
+    #             resolved_owner=None,
+    #             resolved_repo=None,
+    #             resolved_url=None,
+    #             pinned_sha=None,
 
-#                 outcome=SubmoduleOutcome.INACCESSIBLE,
-#                 is_private=None,
-#                 depth=depth,
+    #             outcome=SubmoduleOutcome.INACCESSIBLE,
+    #             is_private=None,
+    #             depth=depth,
 
-#                 auto_selected=False,
-#                 user_can_toggle=(depth == 1),
+    #             auto_selected=False,
+    #             user_can_toggle=(depth == 1),
 
-#                 action_required=False,
-#                 action_label=None,
-#                 action_url=None,
+    #             action_required=False,
+    #             action_label=None,
+    #             action_url=None,
 
-#                 skip_reason=(
-#                     entries.url_error
-#                     or f"Invalid GitHub URL: {entries.raw_url}"
-#                 ),
-#             )
+    #             skip_reason=(
+    #                 entries.url_error
+    #                 or f"Invalid GitHub URL: {entries.raw_url}"
+    #             ),
+    #         )
 
-#         tasks = [
-#             asyncio.create_task(self._classify_submodule(entry, depth))
-#             for entry in entries
-#         ]
-#         raw = await asyncio.gather(*tasks, return_exceptions=True)
+    #     tasks = [
+    #         asyncio.create_task(self._classify_submodule(entry, depth))
+    #         for entry in entries
+    #     ]
+    #     raw = await asyncio.gather(*tasks, return_exceptions=True)
 
-#         nodes = []
-#         for i, result in enumerate(raw):
-#             if isinstance(result, Exception):
-#                 logger.warning("Scout error for '%s': %s", entries[i].path, result)
-#                 nodes.append(SubmoduleNode(
-#                     path=entries[i].path, name=entries[i].name,
-#                     resolved_owner=None, resolved_repo=None,
-#                     resolved_url=None, pinned_sha=None,
-#                     outcome=SubmoduleOutcome.INACCESSIBLE,
-#                     is_private=None, depth=depth,
-#                     auto_selected=False, user_can_toggle=False,
-#                     action_required=False, action_label=None, action_url=None,
-#                     skip_reason=f"Scout error: {result}",
-#                 ))
-#             else:
-#                 nodes.append(result)
+    #     nodes = []
+    #     for i, result in enumerate(raw):
+    #         if isinstance(result, Exception):
+    #             logger.warning("Scout error for '%s': %s", entries[i].path, result)
+    #             nodes.append(SubmoduleNode(
+    #                 path=entries[i].path, name=entries[i].name,
+    #                 resolved_owner=None, resolved_repo=None,
+    #                 resolved_url=None, pinned_sha=None,
+    #                 outcome=SubmoduleOutcome.INACCESSIBLE,
+    #                 is_private=None, depth=depth,
+    #                 auto_selected=False, user_can_toggle=False,
+    #                 action_required=False, action_label=None, action_url=None,
+    #                 skip_reason=f"Scout error: {result}",
+    #             ))
+    #         else:
+    #             nodes.append(result)
 
-#         return nodes
+    #     return nodes
 
 #     async def _classify_submodule(
 #         self,
@@ -531,58 +531,59 @@ class DeepScout:
 #             estimated_source_files=file_count,
 #         )
 
-#     # ─────────────────────────────────────────────────────────────────────────
-#     # Monorepo detection
-#     # ─────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    # Monorepo detection
+    # ─────────────────────────────────────────────────────────────────────────
 
-#     async def _detect_monorepo(
-#         self,
-#         owner: str,
-#         repo: str,
-#         branch: str,
-#         root_files: set[str],
-#     ) -> Optional[MonorepoDetectionResult]:
-#         """
-#         Detect monorepo using GitHub API only. No clone, no disk.
+    async def _detect_monorepo(
+        self,
+        owner: str,
+        repo: str,
+        branch: str,
+        root_files: set[str],
+    ) -> Optional[MonorepoDetectionResult]:
+        """
+        Detect monorepo using GitHub API only. No clone, no disk.
 
-#         The TOOLING_SIGNALS and STRUCTURAL_SIGNALS here are a FAST GATE —
-#         they prevent calling MonorepoDetector at all when there is clearly
-#         no monorepo structure. This saves 3+ API calls per non-monorepo submodule.
+        The TOOLING_SIGNALS and STRUCTURAL_SIGNALS here are a FAST GATE —
+        they prevent calling MonorepoDetector at all when there is clearly
+        no monorepo structure. This saves 3+ API calls per non-monorepo submodule.
 
-#         MonorepoDetector has the same signals internally but it's a heavier
-#         class that fetches config files, scores subprojects, builds dependency
-#         graphs. We only construct it after the gate passes.
-#         """
-#         TOOLING_SIGNALS = {
-#             "nx.json", "turbo.json", "rush.json", "lerna.json",
-#             "pnpm-workspace.yaml", "pnpm-workspace.yml",
-#             "WORKSPACE", "WORKSPACE.bazel",
-#         }
-#         STRUCTURAL_SIGNALS = {"apps", "packages", "services", "libs", "modules"}
+        MonorepoDetector has the same signals internally but it's a heavier
+        class that fetches config files, scores subprojects, builds dependency
+        graphs. We only construct it after the gate passes.
+        """
+        TOOLING_SIGNALS = {
+            "nx.json", "turbo.json", "rush.json", "lerna.json",
+            "pnpm-workspace.yaml", "pnpm-workspace.yml",
+            "WORKSPACE", "WORKSPACE.bazel",
+        }
+        STRUCTURAL_SIGNALS = {"apps", "packages", "services", "libs", "modules"}
 
-#         if not (root_files & TOOLING_SIGNALS) and not (root_files & STRUCTURAL_SIGNALS):
-#             return None   # Fast exit — not a monorepo, skip MonorepoDetector entirely
+        if not (root_files & TOOLING_SIGNALS) and not (root_files & STRUCTURAL_SIGNALS):
+            return None   # Fast exit — not a monorepo, skip MonorepoDetector entirely
 
-#         try:
-#             from src.services.pre_clone.monorepo_detector import MonorepoDetector
-#             detector = MonorepoDetector(
-#                 gh=self.gh,
-#                 installation_id=self.installation_id,
-#             )
-#             result = await detector.detect(
-#                 owner=owner,
-#                 repo=repo,
-#                 default_branch=branch,
-#                 root_files=root_files,
-#                 recent_commit_paths=[],
-#             )
-#             self._api_calls += 3
-#             return result if result.is_monorepo else None
-#         except Exception as e:
-#             logger.warning(
-#                 "Monorepo detection failed for %s/%s: %s", owner, repo, e
-#             )
-#             return None
+        try:
+            from src.services.scout.monorepo_detector import MonorepoDetector
+            detector = MonorepoDetector(
+                gh=self.gh
+            )
+
+            result = await detector.detect(
+                owner=owner,
+                repo=repo,
+                default_branch=branch,
+                root_files=root_files,
+                recent_commit_paths=[],
+                installation_id=self.installation_id
+            )
+            self._api_calls += 3
+            return result if result.is_monorepo else None
+        except Exception as e:
+            logger.warning(
+                "Monorepo detection failed for %s/%s: %s", owner, repo, e
+            )
+            return None
 
 #     # ─────────────────────────────────────────────────────────────────────────
 #     # Size estimation
