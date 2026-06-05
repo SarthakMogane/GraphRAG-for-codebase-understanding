@@ -64,14 +64,6 @@ class MonorepoTooling(str, enum.Enum):
     GO_MODULES  = "go_modules"    # Multiple go.mod files (inferred)
     INFERRED    = "inferred"      # No tooling config, but structure inferred
 
-
-class SubProjectDecision(str, enum.Enum):
-    """Per-subproject decision in a monorepo."""
-    FULL_INGEST  = "full_ingest"   # Materialize + fully parse
-    STUB_ONLY    = "stub_only"     # Record exists, README summary only
-    SKIP         = "skip"          # Not materialized at all (irrelevant)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Validation Pipeline Data Classes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -210,8 +202,9 @@ class SubProjectScore:
 
     # Computed
     composite_score: float = 0.0
-    decision: SubProjectDecision = SubProjectDecision.SKIP
-    skip_reason: Optional[str] = None
+    # ── NEW: UI Recommendation Fields ───────────────────────────────────────
+    recommended_action: str = "EXCLUDE"     # Expected values: "INCLUDE" | "EXCLUDE"
+    recommendation_reason: Optional[str] = None
 
 
 @dataclass
@@ -237,6 +230,7 @@ class MonorepoDetectionResult:
     # Config file that revealed the structure (for audit trail)
     detected_via: Optional[str] = None     # e.g. "nx.json", "turbo.json", "inferred"
     detection_confidence: float = 1.0      # 0.0–1.0 (inferred = lower confidence)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def approved_count(self) -> int:
