@@ -208,7 +208,7 @@ class MonorepoDetector:
     # ─────────────────────────────────────────────────────────────────────────
 
     async def _stage1_tooling_detection(
-        self, owner: str, repo: str, branch: str, root_files: set[str]
+        self, owner: str, repo: str, branch: str, root_files: set[str],installation_id:int
     ) -> tuple[MonorepoTooling, Optional[str], list[RawSubProject]]:
         """
         Read tooling config files to get an authoritative sub-project list.
@@ -218,7 +218,7 @@ class MonorepoDetector:
         # Check each indicator in priority order
         for filename, tooling in TOOLING_INDICATORS.items():
             if filename in root_files:
-                content = await self._fetch_file(owner, repo, branch, filename)
+                content = await self.gh.get_decoded_file_content(owner, repo, branch, filename,installation_id)
                 if content is None:
                     continue
 
@@ -234,7 +234,7 @@ class MonorepoDetector:
 
         # Check package.json for npm/yarn workspaces (needs content inspection)
         if "package.json" in root_files:
-            content = await self._fetch_file(owner, repo, branch, "package.json")
+            content = await self.gh.get_decoded_file_content(owner, repo, branch, "package.json",installation_id)
             if content:
                 subprojects, tooling_type = await self._parse_npm_workspaces(
                     content, owner, repo, branch
@@ -244,7 +244,7 @@ class MonorepoDetector:
 
         # Check Cargo.toml for Rust workspace
         if "Cargo.toml" in root_files:
-            content = await self._fetch_file(owner, repo, branch, "Cargo.toml")
+            content = await self.gh.get_decoded_file_content(owner, repo, branch, "Cargo.toml",installation_id)
             if content:
                 subprojects = await self._parse_cargo_workspace(
                     content, owner, repo, branch
@@ -255,7 +255,7 @@ class MonorepoDetector:
         # Check settings.gradle for Gradle multi-project
         for gradle_file in ("settings.gradle", "settings.gradle.kts"):
             if gradle_file in root_files:
-                content = await self._fetch_file(owner, repo, branch, gradle_file)
+                content = await self.gh.get_decoded_file_content(owner, repo, branch, gradle_file,installation_id)
                 if content:
                     subprojects = self._parse_gradle_settings(content)
                     if subprojects:
@@ -325,7 +325,7 @@ class MonorepoDetector:
             if proj_dir == ".":
                 proj_dir = ""
 
-            content = await self._fetch_file(owner, repo, branch, proj_path)
+            content = await self.gh.get_decoded_file_content(owner, repo, branch, proj_path,installation_id)
             if not content:
                 continue
             try:
@@ -342,7 +342,7 @@ class MonorepoDetector:
 
         # Legacy Nx: projects listed in workspace.json
         if not subprojects:
-            workspace_content = await self._fetch_file(owner, repo, branch, "workspace.json")
+            workspace_content = await self.gh.get_decoded_file_content(owner, repo, branch, "workspace.json",installation_id)
             if workspace_content:
                 try:
                     ws_data = json.loads(workspace_content)
@@ -360,7 +360,7 @@ class MonorepoDetector:
 
     async def _parse_turborepo(
         self, turbo_json_content: str, owner: str, repo: str, branch: str,
-        root_files: set[str],
+        root_files: set[str], installation_id:list[str]
     ) -> list[RawSubProject]:
         """
         Turborepo reads workspace definitions from the root package.json.
@@ -368,7 +368,7 @@ class MonorepoDetector:
         """
         # The actual package locations are in package.json#workspaces
         if "package.json" in root_files:
-            pkg_content = await self._fetch_file(owner, repo, branch, "package.json")
+            pkg_content = await self.gh.get_decoded_file_content(owner, repo, branch, "package.json",installation_id)
             if pkg_content:
                 subprojects, _ = await self._parse_npm_workspaces(
                     pkg_content, owner, repo, branch
@@ -814,44 +814,6 @@ class MonorepoDetector:
     # Helpers
     # ─────────────────────────────────────────────────────────────────────────
 
-    async def _fetch_file(
-        self, owner: str, repo: str, branch: str, path: str ,installation_id:int
-    ) -> Optional[str]:
-        """Fetch a single file's content via GitHub contents API."""
-        
-        try:
-            import base64
-            resp_data = await self.gh.get_file_content(owner,repo,path,installation_id,params={"ref":branch})
-            if not resp_data:
-                return None
-            
-            if not isinstance(resp_data, dict):
-                logger.warning(f"Path '{path}' is a directory, not a file. Skipping.")
-                return None
-
-            content_b64 = resp_data.get("content")
-            if not content_b64:
-                logger.warning(f"File '{path}' has no content field in JSON.")
-                return None
-            # Step 2: Strip out the formatting newlines injected by GitHub
-            cleaned_b64 = content_b64.replace("\n", "").replace("\r", "")
-            
-            # Step 3: Decode from Base64 bytes -> Decode bytes to UTF-8 String
-            decoded_bytes = base64.b64decode(cleaned_b64)
-            return decoded_bytes.decode("utf-8")
-            
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                return None # Expected if a repo doesn't have an optional config file
-            logger.error(f"HTTP error fetching file {path}: {e}")
-            return None
-        except UnicodeDecodeError:
-            # Guardrail D: If the file is binary (like an image), text decoding fails.
-            logger.warning(f"File '{path}' appears to be binary and cannot be decoded to text.")
-            return None
-        except Exception as e:
-            logger.exception(f"Unexpected processing failure for file {path}: {e}")
-            return None
 
     async def _fetch_full_tree_safe(self, owner: str, repo: str, branch: str, installation_id:int,warnings:list[str]) -> list[dict]:
         """Safely fetch the tree, handling GitHub's 100k truncation limit."""

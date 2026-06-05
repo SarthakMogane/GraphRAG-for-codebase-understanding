@@ -372,6 +372,29 @@ class GitHubService:
         return data.get("total_commits", 0)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+    async def get_latest_commit_date(self, owner: str, repo: str, branch: str, installation_id: int) -> Optional[str]:
+        """
+        Fetches the ISO-8601 date string of the most recent commit on a given branch.
+        Used for quick staleness/B3 scoring without downloading full git history.
+        """
+        try:
+            data = await self._get_as_app(
+                f"/repos/{owner}/{repo}/commits",
+                installation_id,
+                params={"sha": branch, "per_page": 1}
+            )
+            
+            # GitHub returns a list of commits. Extract the date from the first one.
+            if data and isinstance(data, list) and len(data) > 0:
+                return data[0].get("commit", {}).get("committer", {}).get("date")
+            return None
+            
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (404, 409): # 409 happens on empty repositories
+                return None
+            raise
+        
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
     async def get_file_content(self, owner: str, repo: str, path: str, installation_id: int, params: dict = None) -> dict:
         """Fetches raw file dictionary payload from GitHub Contents API."""
         data = await self._get_as_app(
@@ -380,6 +403,36 @@ class GitHubService:
             params=params
         )
         return data
+    
+    # helper
+
+    async def get_decoded_file_content(
+        self, owner: str, repo: str, branch: str, path: str, installation_id: int
+    ) -> Optional[str]:
+        """
+        Fetches file from GitHub and decodes the Base64 JSON payload into a clean string.
+        """
+        try:
+            import base64
+            # Reusing your existing raw JSON fetcher
+            resp_data = await self.get_file_content(
+                owner, repo, path, installation_id, params={"ref": branch}
+            )
+            
+            if not resp_data or not isinstance(resp_data, dict):
+                return None
+                
+            content_b64 = resp_data.get("content")
+            if not content_b64:
+                return None
+                
+            # Clean and decode
+            cleaned_b64 = content_b64.replace("\n", "").replace("\r", "")
+            return base64.b64decode(cleaned_b64).decode("utf-8")
+            
+        except Exception as e:
+            logger.warning(f"Failed to decode file {path}: {e}")
+            return None
     # ── Webhook Payload Validation ────────────────────────────────────────────
 
     @staticmethod
