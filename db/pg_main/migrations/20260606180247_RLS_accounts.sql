@@ -1,0 +1,9 @@
+-- migrate:up
+-- row level security 
+ALTER TABLE accounts ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
+
+-- migrate:down
+
+ALTER TABLE accounts NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE accounts DISABLE ROW LEVEL SECURITY;
+
