@@ -323,6 +323,17 @@ function buildStatusBadge(repo) {
 }
 
 function buildActionButton(repo) {
+    // 1. THE NEW UX RULE: If it's public, show it but lock it down.
+    if (repo.private === false) {
+        return `
+            <button class="repo-btn" disabled 
+                style="opacity: 0.5; cursor: not-allowed; background: #2d333b;" 
+                title="Currently, only private repositories are supported for indexing.">
+                🔒 Private Only
+            </button>
+        `;
+    }
+
     const currentAction = repo.action || 'index';
 
     switch(currentAction) {
