@@ -81,78 +81,48 @@ button.primary:hover { background:#2ea043; }
 </div>
 
 <script>
-let currentTaskId = null;
-let popupWindow = null;
-let authObserver = null; 
+let currentTaskId = null; 
 
 /* =========================================
 1. AUTHENTICATION & UI SETUP
 ========================================= */
 window.onload = async () => {
     const urlParams = new URLSearchParams(window.location.search);
-    
-    if (urlParams.get('error') === 'installation_canceled') {
+    const status = urlParams.get('status');
+    const error = urlParams.get('error');
+
+    // 1. Handle user canceling the GitHub flow
+    if (error === 'installation_canceled') {
         alert("You canceled the GitHub connection. We need access to analyze your repositories!");
         window.history.replaceState({}, document.title, window.location.pathname);
     }
 
-    const newInstallId = urlParams.get('installation_id');
-    if (newInstallId) {
-        document.body.innerHTML = `
-            <div style="text-align: center; margin-top: 100px; font-family: sans-serif;">
-                <h2>⏳ Waiting for GitHub...</h2>
-                <p>GitHub is securely confirming your installation in the background.</p>
-                <div class="spinner" style="margin-top: 20px;"></div>
-            </div>`;
+    // 2. The Setup-Redirect Magic (Catching the webhook success)
+    if (status) {
+        // Instantly clean the URL bar so the user doesn't see ?status=installed
+        window.history.replaceState({}, document.title, window.location.pathname);
         
-        const checkWebhook = setInterval(async () => {
-            try {
-                const res = await fetch('http://127.0.0.1:8000/auth/status', { credentials: 'include' });
-                if (res.status === 401) {
-                    clearInterval(checkWebhook);
-                    document.body.innerHTML = `<div style="text-align: center; margin-top: 100px; color: red;"><h2>❌ Session Expired</h2><button class="primary" onclick="window.location.href='/'">Return to Login</button></div>`;
-                    return;
-                }
-                if (res.ok) {
-                    const data = await res.json();
-                    if (data.is_installed) {
-                        clearInterval(checkWebhook);
-                        document.body.innerHTML = `<div style="text-align: center; margin-top: 100px; color: green;"><h2>✅ Installation Confirmed!</h2><p>Closing this tab...</p></div>`;
-                        setTimeout(() => {
-                            if (window.opener) window.close(); 
-                            else window.location.replace(window.location.pathname); 
-                        }, 1500);
-                    }
-                }
-            } catch (e) {}
-        }, 1500);
-        return; 
+        if (status === 'installed' || status === 'updated') {
+            document.getElementById('login-section').classList.add('hidden');
+            document.getElementById('connect-section').classList.add('hidden');
+            document.getElementById('setup-section').classList.remove('hidden');
+            
+            // Start the smart polling while SQS works in the background
+            startSyncPolling();
+            return; // Exit here, let the poller handle the rest
+        }
     }
 
-    window.addEventListener('focus', () => {
-        setTimeout(async () => {
-            try {
-                const res = await fetch('http://127.0.0.1:8000/auth/status', { credentials: 'include' });
-                if (res.ok) {
-                    const data = await res.json();
-                    const connectHidden = document.getElementById('connect-section').classList.contains('hidden');
-                    if (data.is_installed && !connectHidden) {
-                        window.location.reload(); 
-                    } else if (!data.is_installed && connectHidden) {
-                        document.getElementById('setup-section').classList.add('hidden');
-                        document.getElementById('connect-section').classList.remove('hidden');
-                    }
-                }
-            } catch (err) {}
-        }, 500);
-    });
+    // 3. Normal Page Load (Checking Auth)
+    checkAuthAndLoad();
+};
 
+async function checkAuthAndLoad() {
     try {
         const res = await fetch('http://127.0.0.1:8000/auth/status', { credentials: 'include' });
         if (res.ok) {
             const data = await res.json();
             
-            // LOGGED IN: Show header, hide login!
             document.getElementById('login-section').classList.add('hidden');
             document.getElementById('user-name').innerText = data.username;
             document.getElementById('profile-section').classList.remove('hidden');
@@ -166,7 +136,7 @@ window.onload = async () => {
                 document.getElementById('setup-section').classList.add('hidden');
             }
         } else {
-            // NOT LOGGED IN: Hide EVERYTHING except login!
+            // Not Logged In
             document.getElementById('login-section').classList.remove('hidden');
             document.getElementById('profile-section').classList.add('hidden');
             document.getElementById('connect-section').classList.add('hidden');
@@ -175,38 +145,19 @@ window.onload = async () => {
         }
     } catch (e) {
         document.getElementById('login-section').classList.remove('hidden');
-        document.getElementById('profile-section').classList.add('hidden');
-        document.getElementById('connect-section').classList.add('hidden');
-        document.getElementById('setup-section').classList.add('hidden');
-        document.getElementById('chat-section').classList.add('hidden');
     }
-};
+}
 
 function waitForInstall() {
+    // Show a quick transition UI, then redirect the CURRENT tab
     const connectSection = document.getElementById('connect-section');
     connectSection.innerHTML = `
-        <h2>Waiting for GitHub...</h2>
-        <p>Complete the installation in the new tab.</p>
+        <h2>Redirecting to GitHub...</h2>
+        <p>Taking you to the secure authorization page.</p>
         <div class="spinner"></div>
-        <br><br>
-        <button class="repo-btn" onclick="window.location.reload()" style="margin-top:20px;">Cancel / Go Back</button>
     `;
-    popupWindow = window.open('http://127.0.0.1:8000/auth/install', '_blank');
-
-    authObserver = setInterval(async () => {
-        try {
-            const res = await fetch('http://127.0.0.1:8000/auth/status', { credentials: 'include' });
-            if (res.ok) {
-                const data = await res.json();
-                if (data.is_installed) {
-                    clearInterval(authObserver); 
-                    if (popupWindow && !popupWindow.closed) popupWindow.close(); 
-                    connectSection.innerHTML = `<h2>✅ Connected! Loading repos...</h2><div class="spinner"></div>`;
-                    setTimeout(() => window.location.reload(), 1500);
-                }
-            }
-        } catch (err) {}
-    }, 1500);
+    // Notice: No window.open(). We route the current window natively.
+    window.location.href = 'http://127.0.0.1:8000/auth/install';
 }
 
 async function frontendLogout(event) {
@@ -215,6 +166,41 @@ async function frontendLogout(event) {
         await fetch('http://127.0.0.1:8000/auth/logout', { method: 'POST', credentials: 'include' });
         window.location.reload(); 
     } catch (e) { console.error("Logout failed", e); }
+}
+
+
+async function startSyncPolling() {
+    const repoListDiv = document.getElementById('repo-list');
+    repoListDiv.innerHTML = `
+        <div style="text-align:center; padding: 20px;">
+            <div class="spinner" style="border-top-color: #58a6ff;"></div>
+            <p style="margin-top: 15px; color: #8b949e;">Syncing permissions with GitHub... This usually takes a few seconds.</p>
+        </div>
+    `;
+    
+    let attempts = 0;
+    const maxAttempts = 15; // 30 seconds max wait
+
+    const poll = setInterval(async () => {
+        attempts++;
+        try {
+            const res = await fetch('http://127.0.0.1:8000/api/repos', { credentials: 'include' });
+            if (!res.ok) throw new Error("Fetch failed");
+            
+            const repos = await res.json();
+
+            // If the backend worker has finished saving the new repos to Postgres/Neo4j
+            if (repos && repos.length > 0) {
+                clearInterval(poll);
+                fetchRepos(); // Trigger your main UI draw function
+            } else if (attempts >= maxAttempts) {
+                clearInterval(poll);
+                repoListDiv.innerHTML = "<span style='color:#ff7b72;'>Sync timeout. Please refresh the page manually.</span>";
+            }
+        } catch (err) {
+            console.error("Polling error", err);
+        }
+    }, 2000); 
 }
 
 /* =========================================
