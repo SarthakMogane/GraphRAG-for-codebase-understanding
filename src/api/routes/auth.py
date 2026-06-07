@@ -1,9 +1,10 @@
-from src.db.mock_db import MOCK_DB
+from src.database.mock_db import MOCK_DB
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import RedirectResponse,JSONResponse
 from authlib.integrations.starlette_client import OAuth
 from src.core.config import get_settings 
 import asyncio
+import secrets
 
 settings = get_settings()
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -154,9 +155,12 @@ async def redirect_to_github_install(request: Request):
         # update URL 
         return RedirectResponse(url="http://127.0.0.8000/index.html")
         # return RedirectResponse(url='/')
-        
+    install_state = secrets.token_urlsafe(32)  
+
+    request.session["github_install_state"] = install_state
+
     app_slug = "repobeacon"
-    install_url = f"https://github.com/apps/{app_slug}/installations/new"
+    install_url = f"https://github.com/apps/{app_slug}/installations/new?state={install_state}"
     
     return RedirectResponse(url=install_url)
 
@@ -169,86 +173,3 @@ async def logout(request: Request):
 
 
 
-
-# __________________old code ---------------
-
-# from fastapi import APIRouter, Request
-# from fastapi.responses import HTMLResponse, RedirectResponse ,JSONResponse
-# from authlib.integrations.starlette_client import OAuthError
-# # from src.services.github import oauth
-# from src.core.security import create_jwt_token
-
-# # import redis 
-# # redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-
-# router = APIRouter(tags=["Authentication"])
-
-# @router.get("/login")
-# async def login(request: Request):
-#     redirect_uri = request.url_for('auth_callback')
-#     return await oauth.github.authorize_redirect(request, redirect_uri)
-
-# @router.get("/auth/callback")
-# async def auth_callback(request: Request):
-#     try:
-#         token = await oauth.github.authorize_access_token(request)
-#     except OAuthError as error:
-#         return HTMLResponse(f'<h1>OAuth Error: {error.error}</h1>')
-    
-#     resp = await oauth.github.get('user', token=token)
-#     user_data = resp.json()  # change:here .
-#     username = user_data["login"]
-#     github_access_token = token['access_token']
-
-
-#         # --- STEP 1: STORE GITHUB TOKEN IN REDIS (NOT JWT) ---
-#     # Set it to expire in 24 hours to match your JWT
-#     # redis_client.setex(
-#     #     name=f"gh_token:{username}",
-#     #     time=86400, 
-#     #     value=github_access_token
-#     # ) 
-    
-#     jwt_token = create_jwt_token(user_data)
-
-#     response = RedirectResponse(url='/')
-#     response.set_cookie(
-#         key="access_token",
-#         value=jwt_token,
-#         httponly=True,  # JavaScript CANNOT read this
-#         secure=False,   # Set to True in Production (requires HTTPS) change:
-#         samesite="lax", # Protects against CSRF attacks
-#         max_age=86400   # 24 hours in seconds
-#     )
-#     return response 
-
-
-# # --- STEP 3: HOW TO USE THE TOKEN LATER ---
-# # @router.get("/api/github/repos")
-# # async def get_repos(user: dict = Depends(get_current_user)):
-# #     # Get the username from the decoded JWT
-# #     username = user["sub"]
-    
-# #     # Retrieve the secret token from the server-side store
-# #     github_token = redis_client.get(f"gh_token:{username}")
-    
-# #     if not github_token:
-# #         raise HTTPException(status_code=401, detail="GitHub session expired")
-    
-# #     # Now use github_token to call GitHub API...
-# #     return {"message": "Success"}
-
-# # @router.get("/api/auth/status")
-# # async def check_auth_status(user: dict = Depends(get_current_user)):
-# #     """A lightweight endpoint for the frontend to check if the cookie is valid."""
-# #     return {"logged_in": True, "username": user["sub"]}
-
-# @router.post("/api/auth/logout")
-# async def logout():
-#     """Destroys the secure cookie to log the user out."""
-#     response = JSONResponse(content={"message": "Logged out"})
-#     response.delete_cookie("access_token")
-
-#     # redis_client.delete(f"gh_token:{username}").
-#     # change: 
-#     return response
