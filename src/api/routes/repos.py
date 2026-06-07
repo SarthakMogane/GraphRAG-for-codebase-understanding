@@ -1,16 +1,18 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request , Depends
 from typing import List
 from src.services.github import GitHubService
-from src.db.mock_db import MOCK_DB , MockRepository
+from src.database.mock_db import MOCK_DB , MockRepository
 from src.models.database import RepoStatus
+from src.utils.services_helpers import get_github_service
 
 # Notice: Because prefix="/api", your routes automatically become /api/repos
 router = APIRouter(prefix="/api", tags=["Repositories"])
 
-github_service = GitHubService()
+ALLOW_PUBLIC_REPOS = True 
 
 @router.get("/repos")
-async def list_installed_repositories(request: Request):
+async def list_installed_repositories(request: Request,
+                                    github_service: GitHubService = Depends(get_github_service)):
     """
     Fetches the list of repositories the user has granted the app access to.
     Used to populate the frontend dashboard.
@@ -45,6 +47,12 @@ async def list_installed_repositories(request: Request):
 
     try:   
         # 4. Format the data to match exactly what your index.html expects
+
+        valid_repos = [
+            repo for repo in raw_repos 
+            if ALLOW_PUBLIC_REPOS or repo.get("private") is True
+        ]
+
         formatted_repos = [
             {
                 "name": repo["full_name"],
@@ -54,15 +62,19 @@ async def list_installed_repositories(request: Request):
                 "default_branch":repo["default_branch"],
                 "size":repo["size"]
             }
-            for repo in raw_repos
+            for repo in valid_repos
         ]
         repo_table = MOCK_DB["repositories"]
         
-        for repo in raw_repos:
+        for repo in valid_repos:
+            if not repo.get("private"):
+                continue
+
             repo_name = repo["full_name"]
             if repo_name not in repo_table:
                 repo_table[repo_name] = MockRepository(
-
+                        github_id=repo["owner"]["id"],
+                        repo_id =repo["id"],
                         name = repo_name,
                         private= repo["private"],
                         url= repo["html_url"],
@@ -70,7 +82,7 @@ async def list_installed_repositories(request: Request):
                         default_branch = repo["default_branch"],
                         size = repo["size"],
                         status = None,
-                        language =repo["language"]
+                        language =repo.get("language")
                 )
 
         return formatted_repos
@@ -88,7 +100,10 @@ async def list_installed_repositories(request: Request):
 
 # Note: Changed from {full_name} to {owner}/{repo} so FastAPI parses it automatically for us!
 @router.get("/repos/{owner}/{repo}/branches", response_model=List[str])
-async def list_branches(owner: str, repo: str, request: Request):
+async def list_branches(owner: str,
+                        repo: str, 
+                        request: Request,
+                        github_service: GitHubService = Depends(get_github_service)):
     """
     Fetches the branches for a specific repository. 
     Uses the App Installation Token (Server-to-Server) so it can run in the background.
@@ -176,3 +191,39 @@ async def get_repos_status(
             result[name] = {"status": "pending", "action": "none"}
 
     return result
+
+from src.schemas.requests import IndexRequest
+from src.services.pre_clone.pipeline import PreClonePipeline
+@router.post("/repos/index")
+async def validation(data : IndexRequest ,
+                     request : Request,
+                     github_service: GitHubService = Depends(get_github_service) ):
+    "precheck validation of repo link"
+
+    github_id = request.session.get("auth_user_id")
+    if not github_id or github_id not in MOCK_DB["users"]:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    # 2. Get the Installation ID 
+    installation_id = MOCK_DB.get("installations", {}).get(github_id)
+    if not installation_id:
+        raise HTTPException(status_code=403, detail="GitHub App not installed")
+    
+    repo_name = data.repo_name
+    key = data.openai_key
+    mock_repo_tables = MOCK_DB["repositories"]
+    repo = mock_repo_tables[repo_name]
+    url = repo.url
+
+    try:
+        pipe = PreClonePipeline(installation_id=installation_id,
+                                github_service = github_service
+                    # db: AsyncSession = MOCK_DB,
+        )
+        result = await pipe.run(raw_url = url )
+
+        return {"verdict" : result.verdict , "routing":result.routing }
+
+    except Exception as e:
+        raise (e)
+
