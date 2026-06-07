@@ -3,10 +3,13 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import RedirectResponse,JSONResponse
 from authlib.integrations.starlette_client import OAuth
 from src.core.config import get_settings 
+from src.core.logger import get_logger
 import asyncio
 import secrets
 
+
 settings = get_settings()
+logger = get_logger(__name__)
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 # ── Authlib Setup ─────────────────────────────────────────────────────────────
@@ -139,6 +142,8 @@ async def get_auth_status(request: Request):
     user_data = MOCK_DB["users"][github_id]
 
     app_is_installed = github_id in MOCK_DB.get("installations", {})
+    print(app_is_installed)
+    print(MOCK_DB)
 
     return {
         "authenticated": True, 
@@ -163,6 +168,34 @@ async def redirect_to_github_install(request: Request):
     install_url = f"https://github.com/apps/{app_slug}/installations/new?state={install_state}"
     
     return RedirectResponse(url=install_url)
+
+
+@router.get("/github/setup-redirect")
+async def github_app_setup_redirect(
+    request: Request, 
+    setup_action: str = "install", 
+    state: str = None
+):
+    # 1. Initial Installation (Triggered from your App)
+    if setup_action == "install":
+        session_state = request.session.pop("github_install_state", None)
+        
+        if not session_state or state != session_state:
+            logger.warning("CSRF / State mismatch detected.")
+            # We redirect to /login to safely wipe the slate clean
+            return RedirectResponse(url="/login")
+            
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}?status=installed")
+
+    # 2. Permissions Update (Triggered from GitHub Settings)
+    elif setup_action == "update":
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}?status=updated")
+
+    # 3. Fallback for anomalous requests
+    else:
+        # If they somehow got here with missing or weird parameters, 
+        # kick them back to the frontend to let the standard auth check handle them.
+        return RedirectResponse(url=settings.FRONTEND_URL)
 
 @router.post("/logout")
 async def logout(request: Request):

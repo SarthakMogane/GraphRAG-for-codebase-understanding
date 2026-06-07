@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     APP_ENV: str = Field(default="development", pattern="^(development|staging|production)$")
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
+
+
+    #fronted URL :
+    # Local Development
+    FRONTEND_URL:str
+
+# When you deploy, you'll change it to:
+# FRONTEND_URL="https://your-production-domain.com"
     
         # ── GitHub ────────────────────────────────────────────────────────
     # Service account GitHub App credentials for high-rate-limit API access
