@@ -1,9 +1,12 @@
 from src.database.mock_db import MOCK_DB
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException ,Depends
 from fastapi.responses import RedirectResponse,JSONResponse
 from authlib.integrations.starlette_client import OAuth
 from src.core.config import get_settings 
 from src.core.logger import get_logger
+from src.utils.services_helpers import get_github_service
+from src.services.github import GitHubService
+from src.services.github_oauth import oauth
 import asyncio
 import secrets
 
@@ -12,18 +15,6 @@ settings = get_settings()
 logger = get_logger(__name__)
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-# ── Authlib Setup ─────────────────────────────────────────────────────────────
-oauth = OAuth()
-oauth.register(
-    name='github',
-    client_id=settings.GITHUB_CLIENT_ID,
-    client_secret=settings.GITHUB_CLIENT_SECRET,
-    code_challenge_method='S256',
-    access_token_url='https://github.com/login/oauth/access_token',
-    authorize_url='https://github.com/login/oauth/authorize',
-    api_base_url='https://api.github.com/',
-    client_kwargs={'scope': 'user:email'}, 
-)
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -32,6 +23,7 @@ async def login_via_github(request: Request):
     """
     This endpoint instantly redirects user to GitHub's authorization page.
     """
+    request.session.clear()
     redirect_uri = request.url_for('auth_github_callback')
     
     return await oauth.github.authorize_redirect(request, redirect_uri,code_challenge_method='S256')
@@ -45,79 +37,83 @@ async def auth_github_callback(request: Request):
     """
     error = request.query_params.get('error')
     if error:
-        if error == 'access_denied':
-            # return RedirectResponse(url="/?error=denied")
-            return RedirectResponse(url="http://127.0.0.1:5500/?error=denied")
-        raise HTTPException(status_code=400, detail=f"GitHub Error: {error}")
+        logger.warning("GitHub OAuth error: %s", error)
+        redirect_url = (
+            f"{settings.FRONTEND_URL}?error=access_denied"
+            if error == "access_denied"
+            else f"{settings.FRONTEND_URL}?error=oauth_failed"
+        )
+        return RedirectResponse(url=redirect_url)
     
     try:
         token_data = await oauth.github.authorize_access_token(request)
-        user_oauth_token = token_data.get('access_token')
-        
-        if not user_oauth_token:
-            raise HTTPException(status_code=400, detail="Failed to retrieve access token")
+    except Exception as e:
+        logger.error("Token exchange failed: %s", e)
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=token_failed")
+ 
+    oauth_token   = token_data.get("access_token")
+    refresh_token = token_data.get("refresh_token")
 
-        
-        tasks = [
-            oauth.github.get('user', token=token_data),
-            oauth.github.get('user/emails', token=token_data),
-            oauth.github.get('user/installations', token=token_data)
-        ]
+    if not oauth_token:
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=no_token")
 
-        response = await asyncio.gather(*tasks)
-        user_resp, email_resp,installations_resp = response
+    
+    tasks = [
+        oauth.github.get('user', token=token_data),
+        oauth.github.get('user/emails', token=token_data),
+        oauth.github.get('user/installations', token=token_data)
+    ]
 
-        if isinstance(user_resp,Exception):
-            raise HTTPException(status_code=500 , detail="Couldn't fetch Github Profile")
-        user_resp.raise_for_status()
-        github_user = user_resp.json()
+    response = await asyncio.gather(*tasks)
+    user_resp, email_resp,installations_resp = response
 
-        if not isinstance(email_resp,Exception) and email_resp.status_code == 200:
-            emails = email_resp.json()
-            primary_email = next((email['email'] for email in emails if email['primary']), None)
+    if isinstance(user_resp,Exception)or user_resp.status_code != 200:
+        logger.error("Failed to fetch core GitHub profile data: %s", user_resp)
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=profile_failed")
+   
+    github_user = user_resp.json()
 
-        if not isinstance(installations_resp, Exception) and installations_resp.status_code == 200:
-            install_data = installations_resp.json()
-        # ----------------------------------------------------------------------
-        # TODO: DATABASE SAVE
-        # Here is where you would look up the user in your Postgres/SQLite database.
-        # If they don't exist, create them using github_user['id'] and primary_email.
-        # Save 'user_oauth_token' to their database record.
-        # ----------------------------------------------------------------------
-        github_id = str(github_user['id'])
-        username = github_user['login']
-        # ----------------------------------------------------------------------
-        # MOCK DATABASE SAVE
-        # ----------------------------------------------------------------------
-        MOCK_DB["users"][github_id] = {
-            "username": username,
-            "email": primary_email,
-            "oauth_token": user_oauth_token
-        }
-        print(f"[DB MOCK] Saved User: {github_user['login']}")
-        
-        app_slug = "repobeacon" 
-        
-        # Look through their installed apps to find ours
-        existing_install = next(
-            (inst for inst in install_data.get('installations', []) if inst['app_slug'] == app_slug), 
+    primary_email = None
+    if not isinstance(email_resp, Exception) and email_resp.status_code == 200:
+        emails = email_resp.json()
+        primary_email = next(
+            (
+                email["email"] 
+                for email in emails 
+                if email.get("primary") and email.get("verified")
+            ),
             None
         )
-        
-        if existing_install:
-            # They already installed it! Save the ID into our Mock DB
-            MOCK_DB["installations"][github_id] = existing_install['id']
-            print(f"[DB MOCK] Recovered existing installation ID: {existing_install['id']}")
+    # Fallback: If no verified primary email is found, check the public profile email field
+    if not primary_email:
+        primary_email = github_user.get("email")
 
-        request.session["auth_user_id"] = github_id   
-        #update URL 
-        response = RedirectResponse(url="http://127.0.0.1:5500/index.html",status_code= 302)
-        # response = RedirectResponse(url="/", status_code=302)
+    existing_install = []
+    if not isinstance(installations_resp, Exception) and installations_resp.status_code == 200:
+        existing_install = installations_resp.json().get("installations", [])
 
-        return response
+    # # encrypting token 
+    # oauth_token_enc   = await encrypt_token(oauth_token)
+    # refresh_token_enc = await encrypt_token(refresh_token) if refresh_token else None
+    # token_expires     = _parse_token_expiry(token_data)
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Authentication failed: {str(e)}")
+    # ----------------------------------------------------------------------
+    # TODO: DATABASE SAVE
+    # user_id, account_id, is_new = await _upsert_user(
+    #     github_user=github_user,
+    #     primary_email=primary_email,
+    #     oauth_token_enc=oauth_token_enc,
+    #     refresh_token_enc=refresh_token_enc,
+    #     token_expires=token_expires,
+    # )
+    
+    
+
+    #update URL 
+    response = RedirectResponse(url="http://127.0.0.1:5500/index.html",status_code= 302)
+    # response = RedirectResponse(url="/", status_code=302)
+
+    return response
 
 
 @router.get("/status")
