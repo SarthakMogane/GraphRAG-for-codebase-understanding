@@ -4,9 +4,12 @@ from fastapi.responses import RedirectResponse,JSONResponse
 from authlib.integrations.starlette_client import OAuth
 from src.core.config import get_settings 
 from src.core.logger import get_logger
+from src.core.crypto import encrypt_token, decrypt_token
 from src.utils.services_helpers import get_github_service
+from src.utils.auth_helpers import _parse_token_expiry
 from src.services.github import GitHubService
 from src.services.github_oauth import oauth
+
 import asyncio
 import secrets
 
@@ -64,7 +67,7 @@ async def auth_github_callback(request: Request):
         oauth.github.get('user/installations', token=token_data)
     ]
 
-    response = await asyncio.gather(*tasks)
+    response = await asyncio.gather(*tasks,return_exceptions=True)
     user_resp, email_resp,installations_resp = response
 
     if isinstance(user_resp,Exception)or user_resp.status_code != 200:
@@ -92,10 +95,10 @@ async def auth_github_callback(request: Request):
     if not isinstance(installations_resp, Exception) and installations_resp.status_code == 200:
         existing_install = installations_resp.json().get("installations", [])
 
-    # # encrypting token 
-    # oauth_token_enc   = await encrypt_token(oauth_token)
-    # refresh_token_enc = await encrypt_token(refresh_token) if refresh_token else None
-    # token_expires     = _parse_token_expiry(token_data)
+    # encrypting token 
+    oauth_token_enc   = await encrypt_token(oauth_token)
+    refresh_token_enc = await encrypt_token(refresh_token) if refresh_token else None
+    token_expires     = _parse_token_expiry(token_data)
 
     # ----------------------------------------------------------------------
     # TODO: DATABASE SAVE
