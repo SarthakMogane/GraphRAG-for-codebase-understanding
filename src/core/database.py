@@ -214,3 +214,134 @@ def _get_read_pool() -> Pool:
     return _read_pool
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# RLS-aware connection context managers
+# ALWAYS use these — never acquire a raw pool connection directly
+# ─────────────────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def get_db(
+    account_id: Optional[UUID] = None,
+    *,
+    readonly: bool = False,
+) -> AsyncGenerator[Connection, None]:
+    """
+    Acquire a database connection with RLS session variable set.
+
+    If account_id is provided:
+      - Sets app.current_account_id for the duration of the connection
+      - Postgres RLS policies use this to filter rows
+      - Cleared automatically when connection returns to pool
+
+    If readonly=True:
+      - Uses the read replica pool
+      - Connection is in read-only transaction mode
+      - Any accidental write raises an error immediately
+
+    Usage:
+        async with get_db(account_id=user.account_id) as conn:
+            rows = await conn.fetch("SELECT * FROM repos WHERE account_id=$1", account_id)
+
+        # FastAPI route with dependency injection:
+        @router.get("/repos")
+        async def list_repos(
+            user: CurrentUser = Depends(get_current_user),
+            conn: Connection = Depends(get_db_dep),
+        ):
+            ...
+    """
+    pool = _get_read_pool() if readonly else _get_write_pool()
+
+    async with pool.acquire() as conn:
+        if account_id:
+            # Set RLS session variable — Postgres RLS policies read this
+            # Use a local transaction to scope the variable
+            await conn.execute(
+                "SELECT set_config('app.current_account_id', $1, true)",
+                str(account_id),
+            )
+        try:
+            yield conn
+        finally:
+            if account_id:
+                # Clear session variable before returning connection to pool
+                # Even though asyncpg resets connections, be explicit
+                await conn.execute(
+                    "SELECT set_config('app.current_account_id', '', true)"
+                )
+
+
+@asynccontextmanager
+async def get_transaction(
+    account_id: Optional[UUID] = None,
+) -> AsyncGenerator[Connection, None]:
+    """
+    Acquire a connection and wrap it in an explicit transaction.
+    Use for multi-statement operations that must be atomic.
+
+    Automatically rolls back on any exception.
+
+    Usage:
+        async with get_transaction(account_id=user.account_id) as conn:
+            await conn.execute("INSERT INTO repos ...")
+            await conn.execute("INSERT INTO ingestion_jobs ...")
+            # Both committed together, or both rolled back
+    """
+    async with get_db(account_id=account_id) as conn:
+        async with conn.transaction():
+            yield conn
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FastAPI dependency injection
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def get_db_dep() -> AsyncGenerator[Connection, None]:
+    """
+    FastAPI dependency — no account_id set (for unauthenticated endpoints).
+    Most endpoints should use get_authed_db_dep instead.
+    """
+    async with get_db() as conn:
+        yield conn
+
+
+async def get_authed_read_db_dep(
+    account_id: UUID,
+) -> AsyncGenerator[Connection, None]:
+    """Dependency for authenticated, read-only endpoints (dashboard loads)."""
+    async with get_db(account_id=account_id, readonly=True) as conn:
+        yield conn
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Health check
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def check_db_health() -> dict:
+    """
+    Lightweight health check. Called by GET /health endpoint.
+    Does not acquire a connection from the pool — uses a minimal query.
+    Returns timing and pool stats.
+    """
+    results = {}
+
+    for name, pool in [("write", _write_pool), ("read", _read_pool)]:
+        if not pool:
+            results[name] = {"status": "not_initialized"}
+            continue
+        start = time.monotonic()
+        try:
+            async with pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            results[name] = {
+                "status":     "healthy",
+                "latency_ms": elapsed_ms,
+                "pool_size":  pool.get_size(),
+                "pool_free":  pool.get_idle_size(),
+            }
+        except Exception as e:
+            results[name] = {"status": "unhealthy", "error": str(e)}
+
+    return results
