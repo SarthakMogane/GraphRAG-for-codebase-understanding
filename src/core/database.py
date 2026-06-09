@@ -49,6 +49,14 @@ logger = get_logger(__name__)
 settings = get_settings()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Pool singletons
+# Created once at app startup via lifespan(). Never recreate per-request.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_write_pool: Optional[Pool] = None   # Primary RDS instance — reads + writes
+_read_pool:  Optional[Pool] = None   # Read replica (Aurora) — read-only queries
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SSL configuration
@@ -128,5 +136,81 @@ async def _setup_connection(conn: Connection) -> None:
     )
 
     logger.debug("Pool connection initialized")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pool lifecycle
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def create_pools() -> None:
+    """
+    Create the write and read pools. Called once in app lifespan startup.
+    Both pools use SSL and run the setup hook on every new connection.
+    """
+    global _write_pool, _read_pool
+
+    ssl_ctx = _build_ssl_context()
+
+    # Write pool — primary RDS instance
+    _write_pool = await asyncpg.create_pool(
+        dsn=settings.DATABASE_URL,
+        ssl=ssl_ctx,
+        min_size=settings.DB_POOL_MIN_SIZE,
+        max_size=settings.DB_POOL_MAX_SIZE,
+        max_inactive_connection_lifetime=300,   # recycle idle connections after 5 min
+        command_timeout=30,
+        setup=_setup_connection,
+        server_settings={
+            "application_name": "repo-chat-write",
+            "search_path":      "public",
+        },
+    )
+
+    # Read pool — Aurora read replica (falls back to primary if not configured)
+    read_dsn = settings.DATABASE_READ_URL or settings.DATABASE_URL
+    _read_pool = await asyncpg.create_pool(
+        dsn=read_dsn,
+        ssl=ssl_ctx,
+        min_size=settings.DB_READ_POOL_MIN_SIZE,
+        max_size=settings.DB_READ_POOL_MAX_SIZE,
+        max_inactive_connection_lifetime=300,
+        command_timeout=15,   # reads should be faster
+        setup=_setup_connection,
+        server_settings={
+            "application_name":            "repo-chat-read",
+            "search_path":                 "public",
+            "default_transaction_read_only": "on",   # safety: rejects accidental writes
+        },
+    )
+
+    logger.info(
+        "DB pools created — write: %s-%s, read: %s-%s",
+        settings.DB_POOL_MIN_SIZE, settings.DB_POOL_MAX_SIZE,
+        settings.DB_READ_POOL_MIN_SIZE, settings.DB_READ_POOL_MAX_SIZE,
+    )
+
+
+async def close_pools() -> None:
+    """Close all pools gracefully. Called in app lifespan shutdown."""
+    global _write_pool, _read_pool
+    if _write_pool:
+        await _write_pool.close()
+        _write_pool = None
+    if _read_pool:
+        await _read_pool.close()
+        _read_pool = None
+    logger.info("DB pools closed")
+
+
+def _get_write_pool() -> Pool:
+    if not _write_pool:
+        raise RuntimeError("Database pool not initialized. Call create_pools() first.")
+    return _write_pool
+
+
+def _get_read_pool() -> Pool:
+    if not _read_pool:
+        raise RuntimeError("Database pool not initialized. Call create_pools() first.")
+    return _read_pool
 
 
