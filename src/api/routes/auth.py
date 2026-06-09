@@ -9,6 +9,7 @@ from src.utils.services_helpers import get_github_service
 from src.utils.auth_helpers import _parse_token_expiry
 from src.services.github import GitHubService
 from src.services.github_oauth import oauth
+from src.crud.user import _upsert_user
 
 import asyncio
 import secrets
@@ -100,18 +101,16 @@ async def auth_github_callback(request: Request):
     refresh_token_enc = await encrypt_token(refresh_token) if refresh_token else None
     token_expires     = _parse_token_expiry(token_data)
 
-    # ----------------------------------------------------------------------
-    # TODO: DATABASE SAVE
-    # user_id, account_id, is_new = await _upsert_user(
-    #     github_user=github_user,
-    #     primary_email=primary_email,
-    #     oauth_token_enc=oauth_token_enc,
-    #     refresh_token_enc=refresh_token_enc,
-    #     token_expires=token_expires,
-    # )
+    #db save
+    user_id, account_id, is_new = await _upsert_user(
+        github_user=github_user,
+        primary_email=primary_email,
+        oauth_token_enc=oauth_token_enc,
+        refresh_token_enc=refresh_token_enc,
+        token_expires=token_expires,
+    )
     
     
-
     #update URL 
     response = RedirectResponse(url="http://127.0.0.1:5500/index.html",status_code= 302)
     # response = RedirectResponse(url="/", status_code=302)
