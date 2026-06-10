@@ -10,6 +10,7 @@ from src.utils.auth_helpers import _parse_token_expiry
 from src.services.github import GitHubService
 from src.services.github_oauth import oauth
 from src.crud.user import _upsert_user
+from src.crud.installation import _recover_installations
 
 import asyncio
 import secrets
@@ -92,7 +93,7 @@ async def auth_github_callback(request: Request):
     if not primary_email:
         primary_email = github_user.get("email")
 
-    existing_install = []
+    existing_installs = []
     if not isinstance(installations_resp, Exception) and installations_resp.status_code == 200:
         existing_install = installations_resp.json().get("installations", [])
 
@@ -110,6 +111,12 @@ async def auth_github_callback(request: Request):
         token_expires=token_expires,
     )
     
+     # ── Recover any existing GitHub App installations ─────────────────────────
+    if existing_installs:
+        await _recover_installations(
+            account_id=account_id,
+            installs=existing_installs,
+        )
     
     #update URL 
     response = RedirectResponse(url="http://127.0.0.1:5500/index.html",status_code= 302)
