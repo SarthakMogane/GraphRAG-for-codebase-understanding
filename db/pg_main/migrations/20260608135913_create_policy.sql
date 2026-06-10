@@ -28,12 +28,12 @@ CREATE POLICY user_auth_insert ON users
     WITH CHECK (current_settings('app.is_auth_flow',true)= 'true');
 
 -- migrate:down
-DROP POLICY IF EXISTS account_isolation_policy ON accounts
-DROP POLICY IF EXISTS acc_auth_insert ON
+DROP POLICY IF EXISTS account_isolation_policy ON accounts;
+DROP POLICY IF EXISTS acc_auth_insert ON accounts;
 
-DROP POLICY IF EXISTS strict_user_policy ON users
-DROP POLICY IF EXISTS user_auth_select ON users
-DROP POLICY IF EXISTS user_auth_insert ON users
+DROP POLICY IF EXISTS strict_user_policy ON users;
+DROP POLICY IF EXISTS user_auth_select ON users;
+DROP POLICY IF EXISTS user_auth_insert ON users;
 
 
 

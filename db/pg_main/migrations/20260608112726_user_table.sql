@@ -1,5 +1,5 @@
 -- migrate:up
-CREATE TYPE user_role AS ENUM ('owner','admin','member','viewer')
+CREATE TYPE user_role AS ENUM ('owner','admin','member','viewer');
 
 USERS TABLE (Identity & Auth)
 
@@ -30,15 +30,15 @@ CREATE TABLE users (
 
 
 --RLS 
-ALTER users ENABLE ROW LEVEL SECURITY , FORCE ROW LEVEL SECURITY
+ALTER users ENABLE ROW LEVEL SECURITY , FORCE ROW LEVEL SECURITY;
 
 
 -- migrate:down
 
--- drop tables 
-DROP TABLE IF EXISTS users
---- drop types 
-DROP TYPE IF EXISTS user_role 
-
 -- drop RLS 
-ALTER users DISABLE ROW LEVEL SECURITY , NO FORCE ROW LEVEL SECURITY
+ALTER users DISABLE ROW LEVEL SECURITY , NO FORCE ROW LEVEL SECURITY;
+-- drop tables 
+DROP TABLE IF EXISTS users;
+--- drop types 
+DROP TYPE IF EXISTS user_role;
+
