@@ -45,8 +45,22 @@ class Settings(BaseSettings):
 
         # ── PostgreSQL ───────────────────────────────────────────────────
     DATABASE_URL: str                    # postgresql+asyncpg://user:pass@host/db
-    DATABASE_POOL_SIZE: int = 20
-    DATABASE_MAX_OVERFLOW: int = 10
+    DB_POOL_MIN_SIZE: int = 20
+    DB_POOL_MIN_SIZE: int = 10
+
+    DATABASE_READ_URL:str
+    DB_READ_POOL_MIN_SIZE:int =20
+    DB_READ_POOL_MAX_SIZE:int = 10
+
+    RDS_CA_BUNDLE_PATH:str
+
+    # crypto 
+    LOCAL_ENCRYPTION_KEY:str
+    KMS_KEY_ARN_TOKENS: str
+    AWS_REGION:str
+    APP_ENV:str
+
+    
     # App Settings
         # ── Redis (Celery broker + result backend) ───────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
