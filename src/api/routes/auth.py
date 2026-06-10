@@ -11,6 +11,8 @@ from src.services.github import GitHubService
 from src.services.github_oauth import oauth
 from src.crud.user import _upsert_user
 from src.crud.installation import _recover_installations
+from src.core.database import get_authed_read_db_dep
+from uuid import UUID
 
 import asyncio
 import secrets
@@ -118,59 +120,98 @@ async def auth_github_callback(request: Request):
             installs=existing_installs,
         )
     
-    #update URL 
-    response = RedirectResponse(url="http://127.0.0.1:5500/index.html",status_code= 302)
-    # response = RedirectResponse(url="/", status_code=302)
+    request.session["user_id"] = user_id
+    request.session["account_id"] = account_id
+    request.session["is_new"] = is_new
 
-    return response
+    redirect_url = (
+        f"{settings.FRONTEND_URL}?status=new_user"
+        if is_new else
+        f"{settings.FRONTEND_URL}?status=returning"
+    )
+
+    return RedirectResponse(url=redirect_url , status_code=302)
 
 
 @router.get("/status")
 async def get_auth_status(request: Request):
-    github_id = request.session.get("auth_user_id")
-    # github_id = request.cookies.get("auth_user_id")
-    
-
-    # --- OUR DEBUG TRAP ---
-    print("\n=== STATUS CHECK ===")
-    print(f"1. ID found in Cookie: {github_id}")
-    print(f"2. IDs currently in Database: {list(MOCK_DB['users'].keys())}")
-    print("====================\n")
-    if not github_id:
-        raise HTTPException(status_code=401, detail="Browser did not send the cookie")
-    
-    # if github_id not in MOCK_DB["users"]:
-    #     raise HTTPException(status_code=401, detail="Cookie received, but DB is empty!")
-    if not github_id or github_id not in MOCK_DB["users"]:
+    """
+    Fast session check. Called by frontend to know:
+      - Is user logged in?
+      - Have they installed the GitHub App?
+      - What's their plan?
+ 
+    Only reads from session (no DB query) for the auth check itself.
+    Then does ONE DB query for display info (username, plan, install status).
+    """
+    user_id    = request.session.get("user_id")
+    account_id = request.session.get("account_id")
+ 
+    if not user_id or not account_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
-        
-    user_data = MOCK_DB["users"][github_id]
-
-    app_is_installed = github_id in MOCK_DB.get("installations", {})
-    print(app_is_installed)
-    print(MOCK_DB)
-
+ 
+    try:
+        user_uuid    = UUID(user_id)
+        account_uuid = UUID(account_id)
+    except ValueError:
+        # Malformed session value — clear and reject
+        request.session.clear()
+        raise HTTPException(status_code=401, detail="Invalid session")
+ 
+    # One DB query with join — gets everything needed for the status response
+    async with get_authed_read_db_dep(account_id=account_uuid) as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                u.id,
+                u.github_login,
+                u.github_avatar_url,
+                a.plan,
+                a.payment_status,
+                a.queries_this_month,
+                a.max_queries_month,
+                EXISTS(
+                    SELECT 1 FROM installations i
+                    WHERE i.account_id = a.id
+                      AND i.is_active = TRUE
+                ) AS is_installed
+            FROM users u
+            JOIN accounts a ON a.id = u.account_id
+            WHERE u.id = $1
+              AND u.account_id = $2
+            """,
+            user_uuid, account_uuid,
+        )
+ 
+    if not row:
+        # User in session but not in DB — session is stale
+        request.session.clear()
+        raise HTTPException(status_code=401, detail="Session expired")
+ 
     return {
-        "authenticated": True, 
-        "username": user_data["username"],
-        "is_installed": app_is_installed # The frontend will use this!
+        "authenticated":     True,
+        "user_id":           str(row["id"]),
+        "username":          row["github_login"],
+        "avatar_url":        row["github_avatar_url"],
+        "plan":              row["plan"],
+        "is_installed":      row["is_installed"],
+        "queries_remaining": max(
+            0, row["max_queries_month"] - row["queries_this_month"]
+        ),
     }
 
 @router.get("/install")
 async def redirect_to_github_install(request: Request):
     """The frontend calls this when the user actively clicks 'Connect GitHub'"""
-    github_id = request.session.get("auth_user_id")
-
-    if not github_id:
-        # update URL 
-        return RedirectResponse(url="http://127.0.0.8000/index.html")
-        # return RedirectResponse(url='/')
+    user_id = request.session.get("user_id")
+    if not user_id:
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=not_authenticated")
+    
     install_state = secrets.token_urlsafe(32)  
 
     request.session["github_install_state"] = install_state
 
-    app_slug = "repobeacon"
-    install_url = f"https://github.com/apps/{app_slug}/installations/new?state={install_state}"
+    install_url = f"https://github.com/apps/{settings.GITHUB_APP_SLUG}/installations/new?state={install_state}"
     
     return RedirectResponse(url=install_url)
 
@@ -186,9 +227,9 @@ async def github_app_setup_redirect(
         session_state = request.session.pop("github_install_state", None)
         
         if not session_state or state != session_state:
-            logger.warning("CSRF / State mismatch detected.")
-            # We redirect to /login to safely wipe the slate clean
-            return RedirectResponse(url="/login")
+            logger.warning("CSRF state mismatch on app install redirect")
+            request.session.clear()
+            return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=csrf_failed")
             
         return RedirectResponse(url=f"{settings.FRONTEND_URL}?status=installed")
 
@@ -205,8 +246,6 @@ async def github_app_setup_redirect(
 @router.post("/logout")
 async def logout(request: Request):
     request.session.clear()
-    response = JSONResponse(content={"status": "logged_out"})
-    # response.delete_cookie("auth_user_id")
     return JSONResponse(content={"success": True}, status_code=200)
 
 
