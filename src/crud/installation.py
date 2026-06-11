@@ -1,7 +1,7 @@
 from uuid import UUID 
 from src.core.logger import get_logger
 from src.core.config import get_settings
-from src.core.database import get_transaction
+from src.core.database import get_transaction ,get_db_dep
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -54,3 +54,40 @@ async def _recover_installations(
                 "Installation recovered: org=%s install_id=%d",
                 install["account"]["login"], install["id"],
             )
+
+async def _save_installation(
+    account_id:UUID ,
+    installation_id:str
+        ) -> bool:
+    """
+    save installation id in installtions table using account id of current
+    user who clicked the install button
+    Returns True if a new installation was inserted, False if it already existed.
+    """
+
+    async with get_transaction(account_id=account_id) as conn:
+        result = await conn.execute(
+            """
+            INSERT INTO installations(
+            account_id ,
+            github_install_id,
+            owner_login,
+            owner_type,
+            owner_github_id)
+           
+            )
+            VALUES($1,$2,'pending_sync','pending')
+            ON CONFLICT (github_installation_id) DO NOTHING;
+            """,account_id,installation_id )
+        
+        # Check if a row was actually inserted
+        was_inserted = result.endswith("1")
+        
+        if was_inserted:
+            logger.info("Installation saved for account: %s", account_id)
+        else:
+            logger.info("Installation %s already exists for account: %s", installation_id, account_id)
+            
+        return was_inserted
+        
+    

@@ -10,7 +10,7 @@ from src.utils.auth_helpers import _parse_token_expiry
 from src.services.github import GitHubService
 from src.services.github_oauth import oauth
 from src.crud.user import _upsert_user
-from src.crud.installation import _recover_installations
+from src.crud.installation import _recover_installations ,_save_installation
 from src.core.database import get_authed_read_db_dep
 from uuid import UUID
 
@@ -219,19 +219,24 @@ async def redirect_to_github_install(request: Request):
 @router.get("/github/setup-redirect")
 async def github_app_setup_redirect(
     request: Request, 
+    installation_id: str = None,
     setup_action: str = "install", 
     state: str = None
 ):
     # 1. Initial Installation (Triggered from your App)
     if setup_action == "install":
         session_state = request.session.pop("github_install_state", None)
-        
+        account_id = request.session.get("account_id")
+        account_uuid = UUID(account_id)
+
         if not session_state or state != session_state:
             logger.warning("CSRF state mismatch on app install redirect")
             request.session.clear()
             return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=csrf_failed")
-            
-        return RedirectResponse(url=f"{settings.FRONTEND_URL}?status=installed")
+
+        is_new_install = await _save_installation(account_id =account_uuid ,installion_id =installation_id)  
+
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}?status=installed&new_install={str(is_new_install).lower()}")
 
     # 2. Permissions Update (Triggered from GitHub Settings)
     elif setup_action == "update":
