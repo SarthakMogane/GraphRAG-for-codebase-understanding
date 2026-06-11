@@ -291,6 +291,26 @@ async def get_transaction(
         async with conn.transaction():
             yield conn
 
+@asynccontextmanager
+async def get_system_transaction() -> AsyncGenerator[Connection, None]:
+    """
+    Acquire a connection wrapped in a transaction with RLS bypassed.
+    STRICTLY FOR BACKGROUND WORKERS (SQS/Celery). Never use in FastAPI web routes!
+    """
+    async with _get_write_pool().acquire() as conn:
+        async with conn.transaction():
+            # 1. Set the VIP System Pass
+            await conn.execute(
+                "SELECT set_config('app.is_system_flow', 'true', true)"
+            )
+            
+            try:
+                yield conn
+            finally:
+                # 2. Safety cleanup
+                await conn.execute(
+                    "SELECT set_config('app.is_system_flow', '', true)"
+                )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FastAPI dependency injection
@@ -311,7 +331,6 @@ async def get_authed_read_db_dep(
     """Dependency for authenticated, read-only endpoints (dashboard loads)."""
     async with get_db(account_id=account_id, readonly=True) as conn:
         yield conn
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
