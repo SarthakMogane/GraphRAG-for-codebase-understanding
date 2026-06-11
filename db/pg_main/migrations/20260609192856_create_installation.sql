@@ -30,7 +30,11 @@ ALTER installations ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY installation_isolation ON installations
     FOR ALL TO fastapi_app_user
-    USING (account_id = current_settings('app.current_account_id',true)::uuid);
+    USING (account_id = current_settings('app.current_account_id',true)::uuid
+             -- Condition 2: Automated Background Worker (SQS/Celery traffic)
+            OR current_setting('app.is_system_flow', true) = 'true'
+    );
+
 
 -- migrate:down
 
