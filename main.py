@@ -15,14 +15,16 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
+from src.core.logger import get_logger
 import uvicorn
-from loguru import logger
 import uuid
 import json
 import os
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+import asyncio
+import aioboto3
 
-
+from src.core.config import get_settings
 from src.api.routes import auth, chat, evaluation , webhooks,repos
 from src.utils.llm_client import LangChainClient
 from src.indexing.vector_store import VectorStore
@@ -126,14 +128,19 @@ from src.services.github import GitHubService
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Setup
+    app.state.aws_session = aioboto3.session()
+    client_ctx = app.state.aws_session.client("sqs", region_name=settings.AWS_REGION)
+    app.state.sqs_client = await client_ctx.__aenter__()
+    
     app.state.github_service = GitHubService()
+
     yield
+
     # Teardown
     await app.state.github_service.close()
-
-# app = FastAPI(lifespan=lifespan) 
-
+ # ── Shutdown: Cleanly close the connection pool ──
+    await client_ctx.__aexit__(None, None, None)
+    
 
 
 import os
@@ -145,6 +152,8 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from src.core.config import get_settings
 from src.api.routes import repos
 
+
+logger = get_logger(__name__)
 
 settings = get_settings()
 # Initialize FastAPI
@@ -167,7 +176,7 @@ app.add_middleware(
 # Shield 2: Strict Cross-Origin Resource Sharing (CORS)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8000", "https://your-production-domain.com"],
+    allow_origins=["http://localhost:8000", "https://your-production-domain.com","http://127.0.0.1:5500"],
     allow_credentials=True, # MUST be True so the browser sends our httpOnly JWT cookie
     allow_methods=["GET", "POST", "OPTIONS"], # Explicitly deny PUT/DELETE if not used
     allow_headers=["*"],
@@ -177,7 +186,11 @@ app.add_middleware(
 app.add_middleware(
     SessionMiddleware, 
     secret_key=settings.SESSION_SECRET_KEY,
-    max_age=300 # Drops the session cookie after 5 minutes to minimize attack surface
+    max_age=3000,
+    https_only=False ,
+    same_site = "lax",
+    session_cookie="session"
+ # Drops the session cookie after 5 minutes to minimize attack surface
 )
 
 # Shield 4: The Custom Auditor (Performance & Logging)

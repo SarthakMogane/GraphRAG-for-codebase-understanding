@@ -1,16 +1,24 @@
-from fastapi import APIRouter, Request, HTTPException, Header
+from fastapi import APIRouter, Request, HTTPException, Header , Depends
 import logging
+from src.utils.services_helpers import get_sqs_client
 from src.services.github import GitHubService
-from src.db.mock_db import MOCK_DB , MockRepository
+from src.database.mock_db import MOCK_DB , MockRepository
+from src.core.database import get_system_transaction
+from src.core.config import get_settings
+import json
+import aioboto3
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 router = APIRouter(prefix="/api/webhooks", tags=["Webhooks"])
 
 @router.post("/github")
 async def github_webhook(
     request: Request,
     x_hub_signature_256: str = Header(None),
-    x_github_event: str = Header(None)
+    x_github_event: str = Header(None),
+    x_github_delivery: str   = Header(None),
+    sqs_client = Depends(get_sqs_client)
 ):
     """Listens for GitHub App events (like installs and uninstalls)."""
     
@@ -20,80 +28,125 @@ async def github_webhook(
     # 2. Cryptographically verify GitHub sent this using your webhook secret
     if not GitHubService.validate_webhook_signature(payload_bytes, x_hub_signature_256):
         logger.error("Webhook signature validation failed!")
-        raise HTTPException(status_code=401, detail="Invalid signature")
+         # Still return 200 — GitHub should not retry invalid signatures
+        return {"status": "ignored", "reason": "invalid_signature"}
+    
+    if not x_github_delivery or not x_github_event:
+        return {"status": "ignored", "reason": "missing_headers"}
 
     # 3. Parse the JSON safely now that we know it's authentic
     payload = await request.json()
     action = payload.get("action")
     
-    # 4. Handle "Installation" events
-    if x_github_event == "installation":
-        installation_id = payload["installation"]["id"]
-        
-        # Who triggered this? (The GitHub user ID of the person who installed/uninstalled it)
-        sender_id = str(payload["sender"]["id"]) 
-        
-        if action == "created":
-            logger.info(f"[WEBHOOK] App installed! ID: {installation_id} by User: {sender_id}")
-            # Ensure the user exists in our DB before updating
-            if sender_id not in MOCK_DB.get("installations", {}):
-                MOCK_DB.setdefault("installations", {})
-            
-            MOCK_DB["installations"][sender_id] = installation_id
-            
-        elif action == "deleted":
-            logger.info(f"[WEBHOOK] App UNINSTALLED! ID: {installation_id} by User: {sender_id}")
-            # Wipe their installation from our database instantly
-            if sender_id in MOCK_DB.get("installations", {}):
-                del MOCK_DB["installations"][sender_id]
+    #___idempotency check__
+    try:
+        async with get_system_transaction() as conn:
+            existing = await conn.fetchval(
+                "SELECT id FROM webhooks_received WHERE delivery_id = $1",
+                x_github_delivery,
+            )
+            if existing:
+                logger.info(
+                    "Duplicate webhook — delivery_id=%s already processed",
+                    x_github_delivery,
+                )
+                return {"status": "duplicate", "delivery_id": x_github_delivery}
+    except Exception as e:
+        # DB check failed — proceed anyway, worker will handle idempotency again
+        logger.error("Idempotency check failed: %s — proceeding", e)
 
-    if x_github_event == "installation_repositories":
-        installation_id = str(payload["installation"]["id"])
-        action = str(payload.get("action"))
+      # ── Store raw event for audit + idempotency ───────────────────────────────
+    github_install_id = (
+        payload.get("installation", {}).get("id")
+        or payload.get("installation", {}).get("app_id")
+    )
 
-        if action == "added":
-            for repo_data in payload.get("repositories_added",[]):
-                full_name = repo_data["full_name"]
-                github_id = repo_data["id"]
+    db_save = False
 
-                if full_name not in MOCK_DB["repositories"]:
-                    MOCK_DB["repositories"][full_name] = MockRepository(
-                        github_id=github_id,
-                        full_name=full_name,
-                        installation_id=installation_id,
-                        status=None,         # Ready for setup!
-                        is_stale=False
-                    ) 
+    try:
+        async with get_system_transaction() as conn:
+            await conn.execute(
+                """
+                INSERT INTO webhooks_received
+                    (delivery_id, event_type, github_install_id,
+                     repo_full_name, payload, processed)
+                VALUES ($1, $2, $3, $4, $5, FALSE)
+                ON CONFLICT (delivery_id) DO NOTHING
+                """,
+                x_github_delivery,
+                x_github_event,
+                github_install_id,
+                payload.get("repository", {}).get("full_name"),
+                json.dumps(payload),
+            )
+        db_save = True
+    except Exception as e:
+        logger.error("Failed to store webhook — delivery=%s: %s", x_github_delivery, e)
+        # Continue to SQS even if DB insert failed — don't lose the event
+ 
+  
+      # ── Enqueue to SQS for async processing ───────────────────────────────────
+    try:
+        await _enqueue_to_sqs(
+            sqs_client= sqs_client,
+            event_type=x_github_event,
+            delivery_id=x_github_delivery,
+            install_id = github_install_id,
+            payload=payload,
+        )
+    
+    except Exception as e:
+        logger.error(
+            "Failed to enqueue webhook to SQS — delivery=%s: %s",
+            x_github_delivery, e,
+        )
+        if db_save:
+            return {"status":"saved to db only", "delivery_id":x_github_delivery}
+        else:
+           raise HTTPException(
+                status_code=500, 
+                detail="Catastrophic infrastructure failure. Please retry."
+            )
+ 
+    return {"status": "queued", "delivery_id": x_github_delivery}
 
-        elif action == "removed":
-            for repo_data in payload.get("repositories_removed", []):
-                full_name = repo_data["full_name"]
 
-                # Clean up your database safely since you no longer have access
-                if full_name in MOCK_DB["repositories"]:
-                    del MOCK_DB["repositories"][full_name]
 
-        elif action  == "rename":
-             # 1. Extract the single new full name from the top level
-            new_full_name = payload["repository"]["full_name"]
-            
-            # 2. Extract the old repository name from the "changes" object
-            old_name_only = payload["changes"]["repository"]["name"]["from"]
-            owner_login = payload["repository"]["owner"]["login"]
-            old_full_name = f"{owner_login}/{old_name_only}"
+# SQS enqueue
+# ─────────────────────────────────────────────────────────────────────────────
+ 
+async def _enqueue_to_sqs(
+    sqs_client,
+    event_type: str,
+    delivery_id: str,
+    install_id: int,
+    payload: dict,
+) -> None:
+    """
+    Drop the webhook event onto SQS.
+    MessageDeduplicationId prevents SQS-level duplicates (FIFO queue).
+    MessageGroupId groups by installation_id for ordered processing.
+    """
+    
+    group_id = str(install_id) if install_id else "global"
 
-            # 3. Swap the key instantly inside your MOCK_DB without any loops
-            mock_repo_tables = MOCK_DB["repositories"]
-            if old_full_name in mock_repo_tables:
-                repo_obj = mock_repo_tables[old_full_name]
-                
-                # Update the internal attribute
-                repo_obj.full_name = new_full_name 
-                
-                # Assign to new dictionary key and delete the old key
-                mock_repo_tables[new_full_name] = repo_obj 
-                del mock_repo_tables[old_full_name]
+    message = {
+        "event_type":  event_type,
+        "delivery_id": delivery_id,
+        "payload":     payload,
+    }
 
-    # Return 200 OK so GitHub knows we received it successfully
-    return {"status": "ok"}
+    await sqs_client.send_message(
+        QueueUrl=settings.SQS_WEBHOOK_QUEUE_URL,
+        MessageBody=json.dumps(message),
+        MessageDeduplicationId=delivery_id,
+        MessageGroupId=f"install-{group_id}",
+        MessageAttributes={
+            "event_type": {
+                "DataType":    "String",
+                "StringValue": event_type,
+            }
+        },
+    )
+ 
 
