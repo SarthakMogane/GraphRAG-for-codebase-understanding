@@ -3,7 +3,7 @@
 CREATE EXTENSION IF NOT EXISTS citext;
 ---create table 
 CREATE TABLE repos (
-    id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    id                  UUID        PRIMARY KEY DEFAULT uuidv7(),
     account_id          UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     installation_id     UUID        NOT NULL REFERENCES installations(id) ON DELETE CASCADE,
 

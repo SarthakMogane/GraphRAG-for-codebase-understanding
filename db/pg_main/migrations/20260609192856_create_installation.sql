@@ -38,7 +38,7 @@ CREATE POLICY installation_isolation ON installations
 
 -- migrate:down
 
-ALTER installation DISABLE ROW LEVEL SECURITY , NO FORCE ROW LEVEL SECURITY  ;
+ALTER installation DISABLE ROW LEVEL SECURITY , NO FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS installation_isolation;
 DROP TABLE IF EXISTS installations;
