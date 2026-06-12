@@ -68,16 +68,12 @@ async def _save_installation(
     async with get_transaction(account_id=account_id) as conn:
         result = await conn.execute(
             """
-            INSERT INTO installations(
-            account_id ,
-            github_install_id,
-            owner_login,
-            owner_type,
-            owner_github_id)
-           
-            )
-            VALUES($1,$2,'pending_sync','pending')
-            ON CONFLICT (github_installation_id) DO NOTHING;
+            INSERT INTO installations (account_id, github_install_id)
+            VALUES ($1, $2)
+            ON CONFLICT (github_install_id) 
+            DO UPDATE SET 
+                account_id = EXCLUDED.account_id,
+                updated_at = NOW();
             """,account_id,installation_id )
         
         # Check if a row was actually inserted

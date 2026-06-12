@@ -4,7 +4,7 @@ CREATE EXTENSION IF NOT EXISTS citext;
 ---create table 
 CREATE TABLE repos (
     id                  UUID        PRIMARY KEY DEFAULT uuidv7(),
-    account_id          UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    account_id          UUID        REFERENCES accounts(id) ON DELETE CASCADE,
     installation_id     UUID        NOT NULL REFERENCES installations(id) ON DELETE CASCADE,
 
     -- GitHub identity

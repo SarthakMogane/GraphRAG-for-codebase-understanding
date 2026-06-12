@@ -4,13 +4,13 @@ CREATE EXTENSION IF NOT EXISTS citext;
 
 CREATE TABLE installations (
     id                  UUID        PRIMARY KEY DEFAULT uuidv7(),
-    account_id          UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    account_id          UUID        REFERENCES accounts(id) ON DELETE CASCADE,
 
     -- GitHub App identity
     github_install_id   BIGINT      NOT NULL UNIQUE,            -- GitHub's installation ID
-    owner_login         CITEXT      NOT NULL,                   -- org or user name
-    owner_type          TEXT        NOT NULL,                   -- 'User' | 'Organization'
-    owner_github_id     BIGINT      NOT NULL,
+    owner_login         CITEXT,                   -- org or user name
+    owner_type          TEXT,                   -- 'User' | 'Organization'
+    owner_github_id     BIGINT,
 
     -- Cached installation token (refreshed by GitHubAuthManager)
     install_token_enc   BYTEA,                                  -- encrypted
