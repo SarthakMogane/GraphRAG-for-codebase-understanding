@@ -34,6 +34,11 @@ settings = get_settings()
 
 
 # ── Data Classes ──────────────────────────────────────────────────────────────
+class ParentRepoInfo(BaseModel):
+    owner_login: str
+    name: str
+    github_id: int
+    is_private: bool
 
 class RepoMetadata(BaseModel):
     model_config = ConfigDict(strict=True, extra="ignore")
@@ -44,10 +49,13 @@ class RepoMetadata(BaseModel):
     primary_language: Optional[str]
     size_kb: int = Field(alias="size", ge=0)
     is_fork: bool
+    parent_info:Optional[ParentRepoInfo] = None
     is_private: bool = Field(alias="private")
     visibility:str
     is_archived: bool = Field(alias="archived")
     is_empty: bool
+    is_disabled:bool
+    is_template:bool
     has_submodules: bool
     uses_git_lfs: bool
     description: Optional[str]
@@ -131,6 +139,7 @@ class GitHubAuthManager:
         self.client = http_client
         # Cache format: { installation_id: (token, expires_at_timestamp) }
         #update: Redis cache.
+        # self.redis = redis_client
         self._installation_tokens: dict[int, tuple[str, float]] = {}
 
     def _generate_jwt(self) -> str:
@@ -160,6 +169,13 @@ class GitHubAuthManager:
         now = time.time()
         
         #update save the token in redis or db not in self 
+        # cache_key = f"github:install_token:{installation_id}"
+        
+        # # 1. Check Redis first
+        # cached_token = await self.redis.get(cache_key)
+        # if cached_token:
+        #     return cached_token.decode("utf-8")
+        
         # Check if we have a valid cached token for this specific installation
         if installation_id in self._installation_tokens:
             token, expires_at = self._installation_tokens[installation_id]
@@ -183,7 +199,8 @@ class GitHubAuthManager:
 
         # Parse expiry ("2024-01-15T10:00:00Z") using modern Python datetime
         expires_at = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00")).timestamp()
-        
+        # ttl = max(1, int(expires_at - time.time() - 300))------ redis update only
+        # await self.redis.setex(cache_key, ttl, token)
         # Cache and return
         self._installation_tokens[installation_id] = (data["token"], expires_at)
         logger.info(f"GitHub installation token refreshed for installation {installation_id}")
@@ -276,7 +293,7 @@ class GitHubService:
     # ── App API Calls (Installation Token) ────────────────────────────────────
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
-    async def get_installation_for_owner(self, endpoint:str ,installation_id:str):
+    async def get_installation_for_owner(self, endpoint:str ,installation_id:int):
         """installation for owner for installation cache class """
         data = await self._get_as_app(endpoint,installation_id)
         return data
@@ -296,6 +313,18 @@ class GitHubService:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), retry=retry(should_retry_httpx_error),reraise = True )
     async def get_repo_metadata(self, owner: str, repo: str, installation_id: int) -> RepoMetadata:
         data = await self._get_as_app(f"/repos/{owner}/{repo}", installation_id)
+
+        raw_parent = data.get("parent") or data.get("source")
+        parsed_parent = None
+        
+        if raw_parent:
+            parsed_parent = ParentRepoInfo(
+                owner_login=raw_parent["owner"]["login"],
+                name=raw_parent["name"],
+                github_id=raw_parent["id"],
+                is_private=raw_parent.get("private", False)
+            )
+
         branch = data.get("default_branch")
         root_files = await self._get_root_file_list(owner, repo, branch, installation_id)
         
@@ -307,11 +336,14 @@ class GitHubService:
             primary_language=data.get("language"),
             size_kb=data["size"],
             is_fork=data["fork"],
+            parent_info = parsed_parent,
             is_private=data["private"],
             # Add this! Tells you if it is 'public', 'private', or 'internal'
             visibility=data.get("visibility", "private"),
             is_archived=data["archived"],
             is_empty=data["size"] == 0,
+            is_disabled = data.get("disabled"),
+            is_template = data.get("is_template"),
             has_submodules=".gitmodules" in root_files,
             uses_git_lfs=".gitattributes" in root_files,
             description=data.get("description"),
@@ -362,14 +394,22 @@ class GitHubService:
             raise
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
-    async def get_commit_count(self, owner: str, repo: str, since_sha: str, branch: str, installation_id: int, params: dict = None) -> int:
+    async def get_commit_count(self, owner: str, repo: str, since_sha: str, branch: str, installation_id: int, max_count:int, params: dict = None) -> int:
         """Gets commit count since last sha to determine repo churn."""
-        data = await self._get_as_app( 
-            f"/repos/{owner}/{repo}/compare/{since_sha}...{branch}",
-            installation_id,
-            params
-        )
-        return data.get("total_commits", 0)
+        try:
+            data = await self._get_as_app( 
+                f"/repos/{owner}/{repo}/compare/{since_sha}...{branch}",
+                installation_id,
+                params
+            )
+            return data.get("ahead_by", 0)
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (404, 422):
+            # Base SHA not found — repo may have been force-pushed
+                return max_count  # Treat as fully stale
+            if e.response.status_code != 200:
+                return 0
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
     async def get_latest_commit_date(self, owner: str, repo: str, branch: str, installation_id: int) -> Optional[str]:
@@ -494,8 +534,8 @@ class InstallationCache:
         lock = self._locks.setdefault(key,asyncio.Lock())
 
         async with lock:
-            if key in self._cache():
-                return self._cache
+            if key in self._cache:
+                return self._cache[key]
             
             result = await self._fetch(owner)
             self._cache[key] = result
