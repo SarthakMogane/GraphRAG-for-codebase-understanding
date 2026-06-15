@@ -1,102 +1,33 @@
-from fastapi import APIRouter, HTTPException, Request , Depends
+from fastapi import APIRouter, HTTPException, Request , Depends 
+from fastapi.responses import RedirectResponse
 from typing import List
 from src.services.github import GitHubService
 from src.database.mock_db import MOCK_DB , MockRepository
 from src.models.database import RepoStatus
 from src.utils.services_helpers import get_github_service
+from src.core.database import get_transaction
+from src.core.config import get_settings
+
+settings = get_settings()
 
 # Notice: Because prefix="/api", your routes automatically become /api/repos
 router = APIRouter(prefix="/api", tags=["Repositories"])
 
-ALLOW_PUBLIC_REPOS = True 
-
 @router.get("/repos")
-async def list_installed_repositories(request: Request,
-                                    github_service: GitHubService = Depends(get_github_service)):
+async def get_user_repos(request:Request):
     """
-    Fetches the list of repositories the user has granted the app access to.
-    Used to populate the frontend dashboard.
+    Purely observes the database state. Does NOT contact GitHub.
     """
-    # 1. Verify the user is logged in via their EXPLICIT cookie
-    github_id = request.session.get("auth_user_id")
-    if not github_id or github_id not in MOCK_DB["users"]:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    github_id = str(github_id)
-    # 2. Get their OAuth token and installation ID safely using .get()
-    user_oauth_token = MOCK_DB["users"][github_id]["oauth_token"]
-    installation_id = MOCK_DB.get("installations", {}).get(github_id)
-
-    # If they haven't installed the app, return an empty list
-    if not installation_id:
-        return []
-
-    try:
-        # 3. Fetch their repos using the new User-to-Server method
-        raw_repos = await github_service.get_installed_repositories(
-            user_oauth_token=user_oauth_token,
-            installation_id=installation_id
+    account_id = request.session.get("account_id")
+    if not account_id:
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=not_authenticated")
+    
+    async with get_transaction(account_id=account_id) as conn:
+        repos = await conn.fetch(
+            "SELECT * FROM repos WHERE account_id = $1 ORDER BY updated_at DESC", 
+            account_id
         )
-        print("debug: repo endpoint :",raw_repos)
-    except Exception as github_err:
-        # Production-grade: Distinct error telling you GitHub service specifically failed
-        raise HTTPException(
-            status_code=502, 
-            detail=f"GitHub API service communication failure: {str(github_err)}"
-        )
-
-    try:   
-        # 4. Format the data to match exactly what your index.html expects
-
-        valid_repos = [
-            repo for repo in raw_repos 
-            if ALLOW_PUBLIC_REPOS or repo.get("private") is True
-        ]
-
-        formatted_repos = [
-            {
-                "name": repo["full_name"],
-                "private": repo["private"],
-                "url": repo["html_url"],
-                "visibility":repo["visibility"],
-                "default_branch":repo["default_branch"],
-                "size":repo["size"]
-            }
-            for repo in valid_repos
-        ]
-        repo_table = MOCK_DB["repositories"]
-        
-        for repo in valid_repos:
-            if not repo.get("private"):
-                continue
-
-            repo_name = repo["full_name"]
-            if repo_name not in repo_table:
-                repo_table[repo_name] = MockRepository(
-                        github_id=repo["owner"]["id"],
-                        repo_id =repo["id"],
-                        name = repo_name,
-                        private= repo["private"],
-                        url= repo["html_url"],
-                        visibility = repo["visibility"],
-                        default_branch = repo["default_branch"],
-                        size = repo["size"],
-                        status = None,
-                        language =repo.get("language")
-                )
-
-        return formatted_repos
-
-    except KeyError as key_err:
-        # Production-grade: Catches if GitHub unexpectedly changes their JSON payload structure
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Data structure mismatch. Missing expected key: {str(key_err)}"
-        )
-       
-    except Exception as processing_error:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch repositories: {str(processing_error)}")
-
+        return repos
 
 # Note: Changed from {full_name} to {owner}/{repo} so FastAPI parses it automatically for us!
 @router.get("/repos/{owner}/{repo}/branches", response_model=List[str])
@@ -192,38 +123,5 @@ async def get_repos_status(
 
     return result
 
-from src.schemas.requests import IndexRequest
-from src.services.pre_clone.pipeline import PreClonePipeline
-@router.post("/repos/index")
-async def validation(data : IndexRequest ,
-                     request : Request,
-                     github_service: GitHubService = Depends(get_github_service) ):
-    "precheck validation of repo link"
 
-    github_id = request.session.get("auth_user_id")
-    if not github_id or github_id not in MOCK_DB["users"]:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    # 2. Get the Installation ID 
-    installation_id = MOCK_DB.get("installations", {}).get(github_id)
-    if not installation_id:
-        raise HTTPException(status_code=403, detail="GitHub App not installed")
-    
-    repo_name = data.repo_name
-    key = data.openai_key
-    mock_repo_tables = MOCK_DB["repositories"]
-    repo = mock_repo_tables[repo_name]
-    url = repo.url
-
-    try:
-        pipe = PreClonePipeline(installation_id=installation_id,
-                                github_service = github_service
-                    # db: AsyncSession = MOCK_DB,
-        )
-        result = await pipe.run(raw_url = url )
-
-        return {"verdict" : result.verdict , "routing":result.routing }
-
-    except Exception as e:
-        raise (e)
 
