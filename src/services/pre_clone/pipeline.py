@@ -26,18 +26,14 @@ What pipeline.py does NOT do anymore:
   - Staleness measurement (webhook handles this; pipeline just checks the flag)
 
 Output: ValidationResult
-  .should_proceed → True = hand off to deep_scout
+  .verdict → APPROVED = hand off to deep_scout
   .routing        → NEW_INGESTION | REFRESH | SERVE_CACHE
 """
 
 from __future__ import annotations
 
-import logging
+from src.core.logger import get_logger
 from typing import Optional
-
-import httpx
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.database import Repository, RepoStatus
 from src.services.github import GitHubService
@@ -50,6 +46,7 @@ from src.services.pre_clone.stale_checker import (
     check_already_processing,
     check_staleness,
 )
+from src.services.pre_clone.fork_detector import _check_fork
 from src.services.pre_clone.types import (
     ForkInfo,
     RoutingDecision,
@@ -58,7 +55,7 @@ from src.services.pre_clone.types import (
 )
 from src.services.pre_clone.url_parser import parse_github_url
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class PreClonePipeline:
@@ -80,12 +77,12 @@ class PreClonePipeline:
     def __init__(
         self,
         github_service: GitHubService,
-        db: AsyncSession,
+        conn,
         installation_id: int,
         force_refresh: bool = False,
     ):
         self.gh              = github_service
-        self.db              = db
+        self.conn             = conn
         self.installation_id = installation_id
         self.force_refresh   = force_refresh  # on retry
 
@@ -132,20 +129,21 @@ class PreClonePipeline:
             verdict=ValidationVerdict.APPROVED,
             rate_limit=rate_status,
         )
+    
 
         # ── 3. DB cache lookup ─────────────────────────────────────────────
         existing = await self._lookup_db(parsed.owner, parsed.repo)
         if existing:
-            result.existing_repo_db_id = existing.id
+            result.existing_repo_db_id = existing["id"]
 
             # 4. Already processing?
             if not self.force_refresh:
-                active = await check_already_processing(existing, self.db)
+                active = await check_already_processing(existing, self.conn)
                 if active:
                     return ValidationResult(
                         parsed_url=parsed,
                         verdict=ValidationVerdict.ALREADY_PROCESSING,
-                        existing_repo_db_id=existing.id,
+                        existing_repo_db_id=existing["id"],
                         existing_job_status=active,
                         rate_limit=rate_status,
                         message=(
@@ -155,8 +153,8 @@ class PreClonePipeline:
                     )
 
             # Staleness check for READY repos
-            if existing.status == RepoStatus.READY and not self.force_refresh:
-                stale = await check_staleness(existing, self.gh, self.installation_id, self.db)
+            if existing["index_status"] == RepoStatus.READY and not self.force_refresh:
+                stale = await check_staleness(existing, self.gh, self.installation_id, self.conn)
                 result.stale_check = stale
                 if not stale.is_stale:
                     result.routing = RoutingDecision.SERVE_CACHE
@@ -165,8 +163,8 @@ class PreClonePipeline:
                         f"(SHA: {stale.stored_sha[:8] if stale.stored_sha else '?'}). "
                         f"Serving from cache."
                     )
-                    result.default_branch   = existing.default_branch
-                    result.primary_language = existing.primary_language
+                    result.default_branch   = existing["default_branch"]
+                    result.primary_language = existing["primary_language"]
                     return result
                 else:
                     result.routing = RoutingDecision.REFRESH
@@ -185,17 +183,18 @@ class PreClonePipeline:
                 message=e.message,
             )
 
-        result.github_id        = repo_data["id"]
-        result.default_branch   = repo_data["default_branch"]
-        result.primary_language = repo_data.get("language")
-        result.size_kb          = repo_data.get("size", 0)
-        result.description      = repo_data.get("description")
-        result.topics           = repo_data.get("topics", [])
+        result.github_id        = repo_data.github_id
+        result.default_branch   = repo_data.default_branch
+        result.primary_language = repo_data.primary_language
+        result.size_kb          = repo_data.size_kb
+        result.description      = repo_data.description
+        result.topics           = repo_data.topics
 
         # ── Fork check (simplified for private-only product) ──────────────
-        if repo_data.get("fork", False):
-            fork_verdict, fork_info = await self._check_fork(repo_data)
+        if repo_data.is_fork:
+            fork_verdict, fork_info = await _check_fork(repo_data)
             result.fork_info = fork_info
+
             if fork_verdict is not None:
                 result.verdict = fork_verdict
                 result.message = (
@@ -228,57 +227,27 @@ class PreClonePipeline:
         )
         return result
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Fork handling — private-only logic
-    # ─────────────────────────────────────────────────────────────────────────
-
-    async def _check_fork(
-        self, repo_data: dict
-    ) -> tuple[Optional[ValidationVerdict], ForkInfo]:
-        """
-        Private-only fork policy:
-          - Fork of PUBLIC upstream  → reject (don't index OSS the user forked)
-          - Fork of PRIVATE upstream → proceed (still the user's private code)
-          - Can't determine upstream → proceed conservatively
-
-        We do NOT measure divergence. Any private fork is worth indexing —
-        the user has access to it, it may contain their customisations.
-        """
-        parent = repo_data.get("parent") or repo_data.get("source")
-
-        if not parent:
-            # No parent data — treat as standalone
-            return None, ForkInfo(is_fork=True)
-
-        upstream_owner   = parent["owner"]["login"]
-        upstream_repo    = parent["name"]
-        upstream_private = parent.get("private", False)
-        upstream_id      = parent["id"]
-
-        fork_info = ForkInfo(
-            is_fork=True,
-            upstream_owner=upstream_owner,
-            upstream_repo=upstream_repo,
-            upstream_github_id=upstream_id,
-        )
-
-        if not upstream_private:
-            # Upstream is public → this is a fork of OSS → reject
-            fork_info.is_diverged = False
-            return ValidationVerdict.REPO_FORK_OF_PUBLIC, fork_info
-
-        # Upstream is private → index it (user's own private infrastructure)
-        return None, fork_info
 
     # ─────────────────────────────────────────────────────────────────────────
     # DB helpers
     # ─────────────────────────────────────────────────────────────────────────
 
     async def _lookup_db(self, owner: str, repo: str) -> Optional[Repository]:
-        result = await self.db.execute(
-            select(Repository).where(
-                Repository.github_owner == owner,
-                Repository.github_repo  == repo,
-            )
+        return await self.conn.fetchrow(
+            """
+            SELECT 
+                id, 
+                owner_login,
+                repo_name,
+                index_status, 
+                default_branch, 
+                primary_language,
+                index_sha,
+                last_indexed_at
+            FROM repos
+            WHERE owner_login = $1 
+              AND repo_name = $2
+            """,
+            owner, 
+            repo
         )
-        return result.scalar_one_or_none()

@@ -1,6 +1,61 @@
 """
 app/services/pre_clone/fork_detector.py
 ─────────────────────────────────────────
+"""
+
+import logging
+from typing import Optional
+
+import httpx
+
+from src.core.config import get_settings
+from src.services.pre_clone.types import ForkInfo, ValidationVerdict
+
+logger = logging.getLogger(__name__)
+settings = get_settings()
+
+# ─────────────────────────────────────────────────────────────────────────
+    # Fork handling — private-only logic
+    # ─────────────────────────────────────────────────────────────────────────
+
+async def _check_fork(
+        self, repo_data: dict
+    ) -> tuple[Optional[ValidationVerdict], ForkInfo]:
+        """
+        Private-only fork policy:
+          - Fork of PUBLIC upstream  → reject (don't index OSS the user forked)
+          - Fork of PRIVATE upstream → proceed (still the user's private code)
+          - Can't determine upstream → proceed conservatively
+
+        We do NOT measure divergence. Any private fork is worth indexing —
+        the user has access to it, it may contain their customisations.
+        """
+
+        if not repo_data.parent_info:
+            # No parent data — treat as standalone
+            return None, ForkInfo(is_fork=True)
+        
+        parent  = repo_data.parent_info
+
+        fork_info = ForkInfo(
+            is_fork=True,
+            upstream_owner=parent.owner_login,
+            upstream_repo=parent.name,
+            upstream_github_id=parent.github_id,
+        )
+
+        if not parent.is_private:
+            # Upstream is public → this is a fork of OSS → reject
+            fork_info.is_diverged = False
+            return ValidationVerdict.REPO_FORK_OF_PUBLIC, fork_info
+
+        # Upstream is private → index it (user's own private infrastructure)
+        return None, fork_info
+
+
+"""
+New Feature will be : - 
+
 Fork detection and upstream linking.
 
 When a user submits a fork, we have three possible outcomes:
@@ -23,19 +78,6 @@ Divergence is measured by:
 
 Thresholds are configurable in settings.
 """
-
-import logging
-from typing import Optional
-
-import httpx
-
-from src.core.config import get_settings
-from src.services.pre_clone.types import ForkInfo, ValidationVerdict
-
-logger = logging.getLogger(__name__)
-settings = get_settings()
-
-
 async def detect_fork(
     repo_data: dict,
     headers: dict[str, str],

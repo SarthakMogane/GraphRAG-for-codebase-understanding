@@ -49,8 +49,8 @@ async def check_staleness(
     Returns a StaleCheckResult. The caller uses .is_stale to decide
     whether to route to REFRESH or SERVE_CACHE.
     """
-    stored_sha = repo.last_ingested_sha
-    last_indexed_at = repo.last_ingested_at
+    stored_sha = repo["index_sha"]
+    last_indexed_at = repo["last_indexed_at"]
 
     if not stored_sha:
         # No stored SHA → treat as stale (re-ingest)
@@ -64,9 +64,9 @@ async def check_staleness(
 
     # Fetch the live HEAD SHA for the default branch
     live_sha = await _get_live_head_sha(
-        owner=repo.github_owner,
-        repo=repo.github_repo,
-        branch=repo.default_branch,
+        owner=repo["owner_login"],
+        repo=repo["repo_name"],
+        branch=repo["default_branch"],
         installation_id=installation_id
 
     )
@@ -76,7 +76,7 @@ async def check_staleness(
         # to avoid unnecessary re-ingestions. The webhook will catch real changes.
         logger.warning(
             "Could not fetch live HEAD SHA for %s/%s — treating as fresh",
-            repo.github_owner, repo.github_repo,
+            repo["owner_login"], repo["repo_name"]
         )
         return StaleCheckResult(
             is_stale=False,
@@ -88,7 +88,7 @@ async def check_staleness(
     if live_sha == stored_sha:
         logger.info(
             "%s/%s is up to date (SHA: %s)",
-            repo.github_owner, repo.github_repo, stored_sha[:8],
+            repo["owner_login"], repo["repo_name"], stored_sha[:8],
         )
         return StaleCheckResult(
             is_stale=False,
@@ -100,16 +100,16 @@ async def check_staleness(
 
     # SHAs differ — count how many commits landed since last index
     commit_count = await _count_commits_since(
-        owner=repo.github_owner,
-        repo=repo.github_repo,
+        owner=repo["owner_login"],
+        repo=repo["repo_name"],
         since_sha=stored_sha,
-        branch=repo.default_branch,
+        branch=repo["default_branch"],
         installation_id=installation_id,
     )
 
     logger.info(
         "%s/%s is STALE: stored=%s live=%s (%d new commits)",
-        repo.github_owner, repo.github_repo,
+        repo["owner_login"], repo["repo_name"],
         stored_sha[:8], live_sha[:8], commit_count,
     )
 
@@ -123,8 +123,8 @@ async def check_staleness(
 
 
 async def check_already_processing(
-    repo: Repository,
-    db: AsyncSession,
+    repo: dict,
+    conn,
 ) -> Optional[str]:
     """
     Check if a repo already has an active (running/queued) ingestion job.
@@ -132,27 +132,35 @@ async def check_already_processing(
 
     This prevents duplicate concurrent ingestion jobs for the same repo.
     """
-    result = await db.execute(
-        select(IngestionJob)
-        .where(
-            IngestionJob.repo_id == repo.id,
-            IngestionJob.status.in_(["queued", "running"]),
-        )
-        .order_by(IngestionJob.queued_at.desc())
-        .limit(1)
-    )
-    active_job = result.scalar_one_or_none()
 
+
+    active_job = await conn.fetchrow(
+            """
+             SELECT id,status
+             FROM ingestion_jobs
+             WHERE repo_id = $1
+                AND status IN ('queued','runing')
+            ORDER BY created_at DESC 
+            LIMIT 1
+            """,
+            repo[id]
+            
+            )
+    
     if active_job:
         logger.info(
             "%s/%s already has an active job (id=%d, status=%s) — blocking re-queue",
-            repo.github_owner, repo.github_repo, active_job.id, active_job.status,
+            repo["owner_login"], 
+            repo["repo_name"], 
+            active_job["id"], 
+            active_job["status"],
         )
-        return active_job.status
+        return active_job["status"]
 
     return None
 
 
+#---- helpers-----
 async def _get_live_head_sha(
     gh,owner: str, repo: str, branch: str,installation_id:int
 ) -> Optional[str]:
@@ -164,10 +172,8 @@ async def _get_live_head_sha(
         resp = await gh.get_live_head_sha(
             owner,repo,branch,installation_id
         )
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        return data.get("object", {}).get("sha")
+        
+        return resp
     except httpx.HTTPError:
         return None
 
@@ -196,15 +202,11 @@ async def _count_commits_since(
             owner,
             repo,
             since_sha,branch,
-            installation_id,params = {"per_page": 1}
+            installation_id,
+            max_count = max_count,
+            params = {"per_page": 1}
+            
             ) 
-    
-        if resp.status_code in (404, 422):
-            # Base SHA not found — repo may have been force-pushed
-            return max_count  # Treat as fully stale
-        if resp.status_code != 200:
-            return 0
-        data = resp.json()
-        return data.get("ahead_by", 0)
+        return resp
     except httpx.HTTPError:
         return 0

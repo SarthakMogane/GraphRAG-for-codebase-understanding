@@ -20,6 +20,7 @@ so the caller knows exactly why a repo was rejected.
 
 import logging
 from typing import Optional
+from src.services.github import RateLimitError , RepoMetadata
 
 import httpx
 
@@ -49,7 +50,7 @@ async def validate_repo_exists_and_accessible(
     parsed_url: ParsedURL,
     gh,
     installation_id
-) -> dict:
+) -> RepoMetadata:
     """
     Fetch repository metadata from GitHub API and run all structural checks.
 
@@ -60,11 +61,55 @@ async def validate_repo_exists_and_accessible(
     repo  = parsed_url.repo
 
     try:
-        resp = await gh.get_repo_metadata(
+        metadata = await gh.get_repo_metadata(
             owner,
             repo,
             installation_id
         )
+    
+    except RateLimitError as e:
+        raise RepoValidationError(
+            ValidationVerdict.RATE_LIMIT_BLOCKED,
+            str(e)
+        )
+    # We must catch HTTP status errors (401, 403, 404, 500)
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code
+        
+        if status == 404:
+            raise RepoValidationError(
+                ValidationVerdict.REPO_NOT_FOUND,
+                f"Repository {owner}/{repo} does not exist or is not accessible."
+            )
+        if status == 401:
+            raise RepoValidationError(
+                ValidationVerdict.REPO_NOT_FOUND,
+                "GitHub API authentication failed. Check App credentials."
+            )
+        if status == 403:
+            # Check if the 403 is actually a rate limit disguised as a permissions error
+            body = e.response.json() if e.response.headers.get("content-type", "").startswith("application/json") else {}
+            if "rate limit" in body.get("message", "").lower():
+                raise RepoValidationError(
+                    ValidationVerdict.RATE_LIMIT_BLOCKED,
+                    "GitHub API rate limit exceeded during validation."
+                )
+            raise RepoValidationError(
+                ValidationVerdict.REPO_PRIVATE,
+                f"Access denied to {owner}/{repo}. Ensure the app is installed on this repo."
+            )
+        if status >= 500:
+            raise RepoValidationError(
+                ValidationVerdict.REPO_NOT_FOUND,
+                f"GitHub API returned server error {status}. Try again shortly."
+            )
+            
+        # Fallback for unexpected HTTP errors (e.g., 400 Bad Request)
+        raise RepoValidationError(
+            ValidationVerdict.REPO_NOT_FOUND,
+            f"Unexpected HTTP error {status} from GitHub."
+        )
+    
     except httpx.TimeoutException:
         raise RepoValidationError(
             ValidationVerdict.REPO_NOT_FOUND,
@@ -76,44 +121,8 @@ async def validate_repo_exists_and_accessible(
             f"Network error reaching GitHub API: {e}"
         )
 
-    # ── Check 1: Repository existence ────────────────────────────────────────
-    if resp.status_code == 404:
-        raise RepoValidationError(
-            ValidationVerdict.REPO_NOT_FOUND,
-            f"Repository {owner}/{repo} does not exist or is not accessible. "
-            f"Verify the URL is correct and the repository is private."
-        )
-
-    if resp.status_code == 401:
-        raise RepoValidationError(
-            ValidationVerdict.REPO_NOT_FOUND,
-            f"GitHub API authentication failed. Check your GitHub App credentials."
-        )
-
-    if resp.status_code == 403:
-        # Could be private OR rate-limited — check the body
-        body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-        if "rate limit" in body.get("message", "").lower():
-            raise RepoValidationError(
-                ValidationVerdict.RATE_LIMIT_BLOCKED,
-                "GitHub API rate limit exceeded during validation."
-            )
-        raise RepoValidationError(
-            ValidationVerdict.REPO_PRIVATE,
-            f"Access denied to {owner}/{repo}. The repository may be private and app don't have access."
-        )
-
-    if resp.status_code >= 500:
-        raise RepoValidationError(
-            ValidationVerdict.REPO_NOT_FOUND,
-            f"GitHub API returned server error {resp.status_code}. Try again shortly."
-        )
-
-    resp.raise_for_status()
-    data = resp.json()
-
     # ── Check 2: Visibility ───────────────────────────────────────────────────
-    if not data.get("private", False):
+    if not metadata.is_private:
         raise RepoValidationError(
             ValidationVerdict.REPO_PUBLIC,
             f"{owner}/{repo} is a public repository. "
@@ -122,7 +131,7 @@ async def validate_repo_exists_and_accessible(
         )
 
     # ── Check 3: Archived ─────────────────────────────────────────────────────
-    if data.get("archived", False):
+    if metadata.is_archived:
         raise RepoValidationError(
             ValidationVerdict.REPO_ARCHIVED,
             f"{owner}/{repo} is archived. Archived repositories are read-only and "
@@ -135,27 +144,24 @@ async def validate_repo_exists_and_accessible(
 
     # ── Check 4: Disabled ─────────────────────────────────────────────────────
     # GitHub marks repos as disabled when they violate ToS or are under DMCA takedown
-    if data.get("disabled", False):
+    if metadata.is_disabled:
         raise RepoValidationError(
             ValidationVerdict.REPO_DISABLED,
             f"{owner}/{repo} has been disabled by GitHub. "
             f"This typically means a Terms of Service violation or DMCA takedown."
         )
-
-    # Also check visibility field which can be "public", "private", or "internal"
-    visibility = data.get("visibility", "private")
-    if visibility == "public":
+    
+    if metadata.visibility == "public":
         raise RepoValidationError(
             ValidationVerdict.REPO_PUBLIC,
-            f"{owner}/{repo} has visibility '{visibility}'. Only private repositories are supported."
+            f"{owner}/{repo} has visibility '{metadata.visibility}'. Only private repositories are supported."
         )
 
     # ── Check 5: Empty repository ─────────────────────────────────────────────
-    size_kb = data.get("size", 0)
-    if size_kb < _MIN_SIZE_KB:
+    if metadata.is_empty:
         # Double-check: GitHub sometimes reports 0 for a newly initialised repo.
         # Verify by checking the branch list.
-        is_truly_empty = await _verify_empty(gh,owner, repo,installation_id)
+        is_truly_empty = await _verify_empty(gh,owner,repo,installation_id)
         if is_truly_empty:
             raise RepoValidationError(
                 ValidationVerdict.REPO_EMPTY,
@@ -167,17 +173,17 @@ async def validate_repo_exists_and_accessible(
     # ── Check 6: Template-only repo ───────────────────────────────────────────
     # Template repos with is_template=True and 0 non-template commits are
     # basically empty scaffolds. Still index them — but note it.
-    if data.get("is_template", False):
+    if metadata.is_template:
         logger.info("%s/%s is a private template repository — indexing as-is", owner, repo)
 
     # Size warning (not a block)
-    if size_kb > _WARN_SIZE_KB:
+    if metadata.size_kb > _WARN_SIZE_KB:
         logger.warning(
             "%s/%s is very large (%d MB). Ingestion will use sparse checkout.",
-            owner, repo, size_kb // 1024,
+            owner, repo, metadata.size_kb // 1024,
         )
 
-    return data
+    return metadata
 
 
 async def _verify_empty(gh,owner: str, repo: str, installation_id: int) -> bool:
@@ -187,12 +193,10 @@ async def _verify_empty(gh,owner: str, repo: str, installation_id: int) -> bool:
     This call costs 1 API request but only happens when size_kb == 0.
     """
     try:
-        resp = await gh.get_repo_branches(
+        branches = await gh.get_repo_branches(
             owner,repo,installation_id
         )
-        if resp.status_code != 200:
-            return False
-        branches = resp.json()
+        
         return len(branches) == 0
-    except httpx.HTTPError:
-        return False  # Conservative: don't block on network error
+    except Exception:
+        return False  # Conservative: don't block on any error . 
