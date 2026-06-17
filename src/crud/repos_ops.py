@@ -1,3 +1,11 @@
+from uuid import UUID
+from fastapi import HTTPException
+from src.core.logger import get_logger
+import asyncpg
+from src.services.pre_clone.types import ValidationVerdict, RoutingDecision, ValidationResult
+
+logger = get_logger(__name__)
+
 async def _upsert_repos_in_conn(
     conn,
     repos: list[dict],
@@ -92,3 +100,98 @@ async def _remove_repos_in_conn(
         installation_db_id,
         repo_ids_to_remove
     )
+
+# Dependency: verify ownership — prevents IDOR
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _get_owned_repo(
+    repo_id: int,
+    account_id: UUID,
+    conn,  
+):
+    """
+    Returns the Repository record only if it belongs to account_id.
+    Always returns 404 (never 403) to prevent existence enumeration.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT 
+            r.id, 
+            r.account_id, 
+            r.repo_name, 
+            r.github_repo_id, 
+            r.index_status,
+            i.github_install_id
+        FROM repos r
+        INNER JOIN installations i
+        ON i.id = r.installation_id 
+        WHERE id = $1 
+          AND account_id = $2
+        """,
+        repo_id, 
+        account_id,
+    )
+
+    if not row:
+        # Deliberately 404, not 403 — don't reveal whether repo_id exists
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    return row
+
+
+
+async def apply_pipeline_result_to_db(
+    conn, 
+    repo_id: int, 
+    result: ValidationResult
+) -> None:
+    """
+    Translates a ValidationResult directly into a PostgreSQL update.
+    Maps routing decisions to string statuses and merges fresh GitHub metadata.
+    """
+    # ── 1. Translate the Business Decision to a DB String ──────────────
+    new_status = "not_indexed" # Safe fallback
+    
+    if result.verdict == ValidationVerdict.REPO_NOT_FOUND:
+        new_status = "inaccessible"
+    elif result.routing == RoutingDecision.SERVE_CACHE:
+        new_status = "ready"
+    elif result.routing in [RoutingDecision.NEW_INGESTION, RoutingDecision.REFRESH]:
+        new_status = "pending"
+
+    # ── 2. Execute the Database Update ─────────────────────────────────
+    try:
+        # We always update the status, but only update metadata if github_id exists
+        if result.github_id:
+            await conn.execute(
+                """
+                UPDATE repos 
+                SET 
+                    index_status = $1,
+                    github_repo_id = COALESCE($2, github_repo_id),
+                    default_branch = COALESCE($3, default_branch),
+                    primary_language = COALESCE($4, primary_language),
+                    repo_size_kb = COALESCE($5, repo_size_kb),
+                    is_fork = COALESCE($6, is_fork),
+                    updated_at = NOW()
+                WHERE id = $7
+                """,
+                new_status,
+                result.github_id,
+                result.default_branch,
+                result.primary_language,
+                result.size_kb,
+                result.fork_info.is_fork if result.fork_info else None,
+                repo_id
+            )
+        else:
+            # If pipeline failed early (no metadata), just update the status
+            await conn.execute(
+                "UPDATE repos SET index_status = $1, updated_at = NOW() WHERE id = $2",
+                new_status,
+                repo_id
+            )
+
+    except asyncpg.PostgresError as db_err:
+        logger.error("Failed to apply pipeline result for repo %d: %s", repo_id, db_err)
+        raise HTTPException(status_code=500, detail="Database error during repo sync.")
