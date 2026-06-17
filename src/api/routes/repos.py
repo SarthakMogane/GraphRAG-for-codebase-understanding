@@ -4,11 +4,21 @@ from typing import List
 from src.services.github import GitHubService
 from src.database.mock_db import MOCK_DB , MockRepository
 from src.models.database import RepoStatus
+from src.schemas.responses import IndexResponse
+from src.crud.repos_ops import _get_owned_repo ,apply_pipeline_result_to_db
+from uuid import UUID
+from src.core.database import get_transaction
+from src.services.pre_clone.pipeline import PreClonePipeline
+from src.services.pre_clone.types import ValidationVerdict,RoutingDecision
+from src.utils.services_helpers import get_github_service
+from src.services.scout.check_structural_changes import _handle_refresh
 from src.utils.services_helpers import get_github_service
 from src.core.database import get_transaction
 from src.core.config import get_settings
+from src.core.logger import get_logger
 
 settings = get_settings()
+logger = get_logger(__name__)
 
 # Notice: Because prefix="/api", your routes automatically become /api/repos
 router = APIRouter(prefix="/api", tags=["Repositories"])
@@ -124,4 +134,134 @@ async def get_repos_status(
     return result
 
 
+@router.post("repos/{repo_id}/index",response_model=IndexResponse)
+async def index_repo(
+    repo_id : int,
+    request:Request,
+    db = Depends(get_transaction()),
+    _gh = Depends(get_github_service())
+    ):
+    """
+    Entry point for all indexing actions from the dashboard.
+ 
+    Called when user clicks:
+      "Index"     → status was not_indexed
+      "Re-index"  → status was stale
+      "Retry"     → status was failed
+      "Resume"    → status was awaiting_ui (treated as new_ingestion)
+ 
+    Returns next action for the frontend to navigate to.
+    """
+    user_id    = request.session.get("user_id")
+    account_id = request.session.get("account_id")
+    
+    if not user_id or not account_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        account_uuid = UUID(account_id)
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid session")
+
+    #IDOR prevention
+    repo = await _get_owned_repo(repo_id, account_uuid, db) 
+
+     # ── Reject if already actively processing ──────────────────────────────
+    # Prevents duplicate concurrent ingestion jobs for the same repo.
+    # AWAITING_UI is allowed through — user may want to re-submit selections.
+    BLOCKING_STATUSES = {
+        RepoStatus.SCOUTING.value,
+        RepoStatus.CLONING.value,
+        RepoStatus.FILTERING.value,
+        RepoStatus.SUBMODULES.value,
+        RepoStatus.MANIFESTING.value,
+    }
+    current_status = repo["index_status"]
+    if current_status in BLOCKING_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This repository is currently {current_status}. "
+                f"Wait for it to finish or check job status."
+            ),
+        )
+    
+    installation_id = repo["github_install_id"]
+    if not installation_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No GitHub App installation found for this repository. "
+                "Please reinstall the app and grant access to this repo."
+            ),
+        )
+    
+    # Pipeline validates: URL, rate limit, DB cache, GitHub API exists/private,
+    # not archived, not empty, fork check. Returns ValidationResult.
+    pipeline = PreClonePipeline(
+        github_service=_gh,
+        conn=db,
+        installation_id=installation_id,
+        force_refresh=False,
+    )
+    github_url = f"https://github.com/{repo.github_owner}/{repo.github_repo}"
+    result = await pipeline.run(github_url)
+
+    # ── 2. Persist the Result to PostgreSQL ─────────────────────────────
+    # This single helper automatically translates the verdict/routing into the 
+    # correct string ('inaccessible', 'ready', 'pending') and merges the GitHub metadata.
+    await apply_pipeline_result_to_db(conn=db, repo_id=repo_id, result=result)
+
+    # ── 3. Handle Rejections (Early Exit) ───────────────────────────────
+    if result.verdict != ValidationVerdict.APPROVED:
+        status_code = _verdict_to_http_status(result.verdict)
+        raise HTTPException(
+            status_code=status_code,
+            detail=result.message or f"Pipeline rejected: {result.verdict.value}",
+        )
+
+    # ── 4. Handle Approvals (Routing logic) ─────────────────────────────
+    if result.routing == RoutingDecision.SERVE_CACHE:
+        return IndexResponse(
+            repo_id=repo_id,
+            next="none",
+            message=f"{repo['full_name']} is up to date. Wiki is ready.",
+            wiki_url=f"/wiki/{repo_id}",
+        )
+
+    if result.routing == RoutingDecision.NEW_INGESTION:
+        return IndexResponse(
+            repo_id=repo_id,
+            next="scout",
+            message=f"{repo['full_name']} approved. Starting structure scan.",
+        )
+
+    if result.routing == RoutingDecision.REFRESH:
+        return await _handle_refresh(
+            repo=repo,                         # Pass the asyncpg record dict
+            repo_id=repo_id,
+            result=result,
+            installation_id=installation_id,
+            conn=db,                         
+        )
+
+    # ── 5. Fallback ─────────────────────────────────────────────────────
+    logger.error("Unhandled routing decision: %s", result.routing)
+    raise HTTPException(status_code=500, detail="Unexpected routing state")
+ 
+
+# HTTP status mapping for pipeline verdicts
+# ─────────────────────────────────────────────────────────────────────────────
+ 
+def _verdict_to_http_status(verdict: ValidationVerdict) -> int:
+    return {
+        ValidationVerdict.URL_PARSE_ERROR:      400,
+        ValidationVerdict.RATE_LIMIT_BLOCKED:   429,
+        ValidationVerdict.REPO_NOT_FOUND:       404,
+        ValidationVerdict.REPO_PRIVATE:         403,
+        ValidationVerdict.REPO_ARCHIVED:        422,
+        ValidationVerdict.REPO_DISABLED:        422,
+        ValidationVerdict.REPO_EMPTY:           422,
+        ValidationVerdict.REPO_FORK_REDIRECTED: 422,
+        ValidationVerdict.ALREADY_PROCESSING:   409,
+    }.get(verdict, 400)
 
