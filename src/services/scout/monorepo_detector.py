@@ -30,22 +30,21 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
-
-import httpx
+from typing import Optional
 import yaml
 import asyncio
-
+import sys
+import fnmatch
 from src.core.config import get_settings
 from src.services.pre_clone.types import (
     MonorepoDetectionResult, MonorepoTooling,
     SubProjectDecision, SubProjectScore,
 )
-from src.services.github import GitHubService
+from src.services.github import GitHubService , TreeEntry
 
-try:
+if sys.version_info >= (3, 11):
     import tomllib
-except ImportError:
+else:
     try:
         import tomli as tomllib
     except ImportError:
@@ -97,10 +96,6 @@ SCORE_WEIGHTS = {
 
 # Decision thresholds
 RECOMMEND_INCLUDE_THRESHOLD = 0.30
-FULL_INGEST_THRESHOLD = 0.35   # Score ≥ this → FULL_INGEST
-STUB_THRESHOLD        = 0.15   # Score ≥ this → STUB_ONLY, else SKIP
-MAX_FULL_INGEST       = 50     # Hard cap on FULL_INGEST dirs (sparse checkout limit)
-MIN_SOURCE_FILES      = 3      # Sub-projects with fewer source files → SKIP always
 
 
 @dataclass
@@ -133,6 +128,7 @@ class MonorepoDetector:
         root_files: set[str],          # Root-level filenames (already fetched)
         recent_commit_paths: list[str],
         installation_id: str # Files touched in recent commits (for churn)
+
     ) -> MonorepoDetectionResult:
         """
         Main entry point. Returns MonorepoDetectionResult.
@@ -146,13 +142,13 @@ class MonorepoDetector:
         warnings :list[str] = [] 
         # ── Stage 1: Tooling detection ─────────────────────────────────────
         tooling, detected_via, raw_subprojects = await self._stage1_tooling_detection(
-            owner, repo, default_branch, root_files
+            owner, repo, default_branch, root_files , installation_id, warnings
         )
 
         if not raw_subprojects:
             # ── Stage 2: Structural inference ─────────────────────────────
             raw_subprojects, tooling, detected_via = await self._stage2_structural_inference(
-                owner, repo, default_branch, root_files
+                owner, repo, default_branch, root_files , installation_id , warnings
             )
 
         # 3. Unmanaged Folder Detection (Scripts/Notebooks)
@@ -316,7 +312,7 @@ class MonorepoDetector:
         tree = await self._fetch_full_tree_safe(owner, repo, branch ,installation_id , warnings)
         project_json_paths = [
             e["path"] for e in tree
-            if e["path"].endswith("/project.json") or e["path"] == "project.json"
+            if e.path.endswith("/project.json") or e.path == "project.json"
         ]
 
         for proj_path in project_json_paths:
@@ -531,10 +527,10 @@ class MonorepoDetector:
         tree = await self._fetch_full_tree_safe(owner, repo, branch,installation_id, warnings)
         build_dirs = set()
         for entry in tree:
-            if entry["path"] in ("BUILD", "BUILD.bazel") or \
-               entry["path"].endswith("/BUILD") or \
-               entry["path"].endswith("/BUILD.bazel"):
-                parent = str(Path(entry["path"]).parent)
+            if entry.path in ("BUILD", "BUILD.bazel") or \
+               entry.path.endswith("/BUILD") or \
+               entry.path.endswith("/BUILD.bazel"):
+                parent = str(Path(entry.path).parent)
                 if parent != ".":
                     build_dirs.add(parent)
 
@@ -568,7 +564,7 @@ class MonorepoDetector:
 
         # Fetch the tree to find manifest files inside candidate dirs
         tree = await self._fetch_full_tree_safe(owner, repo, branch,installation_id,warnings)
-        tree_paths = {e["path"] for e in tree}
+        tree_paths = {e.path for e in tree}
 
         subprojects = []
         for top_dir in candidate_dirs:
@@ -652,7 +648,7 @@ class MonorepoDetector:
         self,
         raw_subprojects: list[RawSubProject],
         dep_graph: dict[str, list[str]],
-        full_tree: list[dict],
+        full_tree: list[TreeEntry],
         recent_commit_paths: list[str],
     ) -> list[SubProjectScore]:
         """
@@ -705,7 +701,7 @@ class MonorepoDetector:
             # ── Signal 2: Entry point presence ────────────────────────────
             entry_point_files = [
                 e for e in full_tree
-                if e["path"].startswith(sp_prefix)
+                if e.path.startswith(sp_prefix)
                 # Safely extract the filename without the extension
                 and (e["path"].split("/")[-1].split(".")[0].lower() in ENTRY_POINT_STEMS)
                 and e["type"] == "blob"
@@ -901,10 +897,9 @@ class MonorepoDetector:
             str(Path(e["path"]).parent)
             for e in tree
             # Safely use .get() since this is now a dictionary
-            if e.get("type") == "blob" and Path(e["path"]).name in SUBPROJECT_MANIFESTS
+            if e.type == "blob" and Path(e.path).name in SUBPROJECT_MANIFESTS
         }
 
-        import fnmatch
         subprojects = []
         for pattern in patterns:
             # Normalize pattern: remove trailing /**
