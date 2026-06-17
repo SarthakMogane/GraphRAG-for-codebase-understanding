@@ -169,3 +169,106 @@ async def _gitmodules_content_changed(
         return True   # Fail safe
     
 
+# REFRESH handler — the complex case
+# ─────────────────────────────────────────────────────────────────────────────
+ 
+async def _handle_refresh(
+    repo:dict,
+    repo_id: int,
+    result,
+    installation_id: int,
+    conn,
+) -> IndexResponse:
+    """
+    Handle a stale repo. Decides between:
+      - Silent re-ingest (code-only change, saved selection exists)
+      - Structural re-scout (structure changed, show updated checklist)
+    """
+    stale = result.stale_check
+ 
+    # ── Check if we have saved selections from last time ──────────────────────
+    saved_selection = await conn.fetchrow(
+        """
+            SELECT id, selected_subprojects, selected_submodules
+            FROM user_selections
+            WHERE repo_id = $1 
+
+        """,
+        repo_id
+    )
+ 
+    # No saved selections → must go through scout regardless
+    if not saved_selection:
+        logger.info(
+            "%s is stale but has no saved selections — routing to scout",
+            repo["full_name"],
+        )
+        return IndexResponse(
+            repo_id=repo_id,
+            next="scout",
+            message=(
+                f"{repo.full_name} has new commits. "
+                f"Scanning structure before indexing."
+            ),
+        )
+ 
+    # ── Check for structural change ───────────────────────────────────────────
+    # Cost: 2 API calls (root tree at current SHA + root tree at last scout SHA)
+    # Only run if we have both SHAs to compare
+    current_sha   = stale.live_sha if stale else None
+    previous_sha  = repo["last_scout_sha"]
+ 
+    structural_diff = None
+    is_structural   = False
+ 
+    if current_sha and previous_sha and current_sha != previous_sha:
+        is_structural, structural_diff = await _check_structural_change(
+            owner=repo["github_owner"],
+            repo=repo["github_repo"],
+            branch=repo["default_branch"],
+            current_sha=current_sha,
+            previous_sha=previous_sha,
+            installation_id=installation_id,
+        )
+ 
+    # ── Structural change → re-scout with diff ────────────────────────────────
+    if is_structural:
+        logger.info(
+            "%s has structural changes — routing to scout. diff=%s",
+            repo["full_name"], ["structural_diff"],
+        )
+        await conn.execute(
+            "UPDATE repos SET index_status = 'pending', updated_at = NOW() WHERE id = $1", 
+            repo_id
+        )
+        
+        return IndexResponse(
+            repo_id=repo_id,
+            next="scout",
+            message=(
+                f"{repo["full_name"]} has structural changes since last index. "
+                f"Review the updated structure below."
+            ),
+            structural_diff=structural_diff,
+            # Frontend uses structural_diff to show NEW/REMOVED badges
+            # on the checklist. Previous selections are pre-filled.
+        )
+ 
+    # ── Code-only change → silent re-ingest with saved selections ────────────
+    logger.info(
+        "%s has code-only changes (%d commits) — silent re-ingest",
+        repo["full_name"],
+        stale.commits_since_last_index if stale else 0,
+    )
+ 
+    
+    commit_count = stale.commits_since_last_index if stale else 0
+    return IndexResponse(
+        repo_id=repo_id,
+        next="ingest",
+        message=(
+            f"{repo.full_name} has {commit_count} new commit(s). "
+            f"Re-indexing with your saved configuration."
+        ),
+        job_id=job_id,
+    )
