@@ -1,6 +1,15 @@
 -- migrate:up
 
 CREATE EXTENSION IF NOT EXISTS citext;
+
+CREATE TYPE repo_status   AS ENUM (
+    'not_indexed', 'pending', 'scouting', 'awaiting_ui',
+    'cloning', 'filtering', 'submodules', 'manifesting',
+    'ready', 'stale', 'failed', 'inaccessible'
+);
+
+CREATE TYPE structure_type   AS ENUM ('flat', 'monorepo', 'has_submodules', 'mono_with_submodules');
+
 ---create table 
 CREATE TABLE repos (
     id                  UUID        PRIMARY KEY DEFAULT uuidv7(),
@@ -69,6 +78,8 @@ ALTER repos DISABLE ROW LEVEL SECURITY,NO FORCE ROW LEVEL SECURITY
 DROP POLICY IF EXISTS repos_tenant_isolation
 DROP TABLE IF EXISTS repos
 DROP EXTENSION IF EXISTS citext
+DROP TYPE IF EXISTS repo_status
+DROP TYPE IF EXISTS structure_type
 
 
 
