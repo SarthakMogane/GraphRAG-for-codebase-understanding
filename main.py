@@ -21,6 +21,8 @@ import uuid
 import json
 import os
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+from fastapi.responses import JSONResponse
+import asyncpg
 import asyncio
 import aioboto3
 
@@ -119,6 +121,8 @@ import os
 # except Exception as e:
 #     print(f"Error: {e}")
 
+
+
 # ============================================
 # FastAPI App
 # ============================================
@@ -164,6 +168,23 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# ── The Global Database Safety Net ────────────────────────────────────
+@app.exception_handler(asyncpg.PostgresError)
+async def postgres_error_handler(request: Request, exc: asyncpg.PostgresError):
+    """
+    Catches ALL raw asyncpg errors across the entire application.
+    Prevents SQL injection data leaks and unhandled 500 crashes.
+    """
+    # 1. Log the highly detailed SQL error internally for your debugging
+    logger.error(
+        f"CRITICAL DB ERROR | Path: {request.method} {request.url.path} | Error: {str(exc)}"
+    )
+    
+    # 2. Return a safe, generic 500 error to the Next.js frontend
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal database error occurred while processing your request. Please try again."},
+    )
 # 2. THE SECURITY MIDDLEWARE STACK 
 # (Order matters: These wrap the application from the outside in)
 
