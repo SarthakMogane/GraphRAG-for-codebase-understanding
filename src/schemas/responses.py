@@ -28,78 +28,86 @@ class RepoResponse(BaseModel):
 
     model_config = {"from_attributes": True}
 
-class JobResponse(BaseModel):
-    id: int
+class SelectionResponse(BaseModel):
+    selection_id: int
     repo_id: int
-    job_type: str
-    celery_task_id: Optional[str]
-    status: str
-    queued_at: datetime
-    started_at: Optional[datetime]
-    completed_at: Optional[datetime]
-    files_total: Optional[int]
-    files_accepted: Optional[int]
-    files_excluded: Optional[int]
-    error_message: Optional[str]
-
-    model_config = {"from_attributes": True}
-
-
-class SubmitRepoResponse(BaseModel):
-    repo: RepoResponse
-    job: JobResponse
+    job_id: Optional[int] = None
     message: str
+    selected_subprojects: list[str]
+    selected_submodules: list[str]
 
-class FileManifestSummary(BaseModel):
-    total_files: int
-    tier1_source: int
-    tier2_config: int
-    tier3_docs: int
-    excluded: int
-    entry_points: int
-    test_files: int
-    generated_files: int
-class SubmoduleSummary(BaseModel):
-    path: str
-    resolved_owner: Optional[str]
-    resolved_repo: Optional[str]
-    is_internal: Optional[bool]
-    outcome: str
-    skip_reason: Optional[str]
-    complexity_band: Optional[str]
+# class JobResponse(BaseModel):
+#     id: int
+#     repo_id: int
+#     job_type: str
+#     celery_task_id: Optional[str]
+#     status: str
+#     queued_at: datetime
+#     started_at: Optional[datetime]
+#     completed_at: Optional[datetime]
+#     files_total: Optional[int]
+#     files_accepted: Optional[int]
+#     files_excluded: Optional[int]
+#     error_message: Optional[str]
 
-    model_config = {"from_attributes": True}
-
-class IngestionStatusResponse(BaseModel):
-    repo: RepoResponse
-    latest_job: Optional[JobResponse]
-    manifest_summary: Optional[FileManifestSummary]
-    submodules: list[SubmoduleSummary]
-class QueryResponse(BaseModel):
-    """Query response schema"""
-    query: str
-    answer: str
-    query_type: str  # 'global' or 'local'
-    confidence: float
-    sources: List[dict]
-    verified: bool
-    timing: dict
-    request_id: str
+#     model_config = {"from_attributes": True}
 
 
-class HealthResponse(BaseModel):
-    """Health check response"""
-    status: str
-    version: str
-    components: dict
+# class SubmitRepoResponse(BaseModel):
+#     repo: RepoResponse
+#     job: JobResponse
+#     message: str
+
+# class FileManifestSummary(BaseModel):
+#     total_files: int
+#     tier1_source: int
+#     tier2_config: int
+#     tier3_docs: int
+#     excluded: int
+#     entry_points: int
+#     test_files: int
+#     generated_files: int
+# class SubmoduleSummary(BaseModel):
+#     path: str
+#     resolved_owner: Optional[str]
+#     resolved_repo: Optional[str]
+#     is_internal: Optional[bool]
+#     outcome: str
+#     skip_reason: Optional[str]
+#     complexity_band: Optional[str]
+
+#     model_config = {"from_attributes": True}
+
+# class IngestionStatusResponse(BaseModel):
+#     repo: RepoResponse
+#     latest_job: Optional[JobResponse]
+#     manifest_summary: Optional[FileManifestSummary]
+#     submodules: list[SubmoduleSummary]
+# class QueryResponse(BaseModel):
+#     """Query response schema"""
+#     query: str
+#     answer: str
+#     query_type: str  # 'global' or 'local'
+#     confidence: float
+#     sources: List[dict]
+#     verified: bool
+#     timing: dict
+#     request_id: str
 
 
-class MetricsResponse(BaseModel):
-    """Metrics response"""
-    total_queries: int
-    avg_latency: float
-    cache_hit_rate: float
-    error_rate: float
+# class HealthResponse(BaseModel):
+#     """Health check response"""
+#     status: str
+#     version: str
+#     components: dict
+
+
+# class MetricsResponse(BaseModel):
+#     """Metrics response"""
+#     total_queries: int
+#     avg_latency: float
+#     cache_hit_rate: float
+#     error_rate: float
 
 
 class WebhookPayload(BaseModel):
