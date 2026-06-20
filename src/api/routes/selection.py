@@ -179,3 +179,29 @@ async def run_scout(
 
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /repos/{id}/scout — fetch cached result
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/repos/{repo_id}/scout")
+async def get_scout(
+    repo_id: int, 
+    conn = Depends(get_authed_read_db_dep) 
+):
+    repo = await conn.fetchrow("SELECT last_scout_sha, last_scout_at FROM repos WHERE id = $1", repo_id)
+    if not repo or not repo["last_scout_sha"]:
+        raise HTTPException(status_code=404, detail="No blueprint data tracked for this repository instance.")
+
+    cached_json = await conn.fetchval(
+        "SELECT scout_json FROM repo_scout_results WHERE repo_id = $1 AND head_sha = $2 LIMIT 1",
+        repo_id, repo["last_scout_sha"]
+    )
+    if not cached_json:
+        raise HTTPException(status_code=404, detail="Cached blueprint metadata missing from storage schemas.")
+
+    return {
+        "head_sha": repo["last_scout_sha"],
+        "scouted_at": repo["last_scout_at"].isoformat() if repo["last_scout_at"] else None,
+        "scout": json.loads(cached_json),
+    }
+
