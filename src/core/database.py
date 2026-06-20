@@ -40,7 +40,7 @@ from uuid import UUID
 
 import asyncpg
 from asyncpg import Connection, Pool
-from fastapi import HTTPException
+from fastapi import HTTPException , Depends , Request
 
 from src.core.config import get_settings
 from src.core.logger import get_logger
@@ -316,6 +316,25 @@ async def get_system_transaction() -> AsyncGenerator[Connection, None]:
 # FastAPI dependency injection
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def get_current_account_id(request: Request) -> UUID:
+    """
+    Extracts the tenant identity parameter directly from the active HTTP session.
+    Keeps the database framework decoupled from high-level auth utilities.
+    """
+    account_id_str = request.session.get("account_id")
+    if not account_id_str:
+        raise HTTPException(
+            status_code=401, 
+            detail="Access Denied: Missing active authentication session context."
+        )
+    try:
+        return UUID(account_id_str)
+    except ValueError:
+        raise HTTPException(
+            status_code=400, 
+            detail="Malformed Session Token: Multi-tenancy key type verification failure."
+        )
+
 async def get_db_dep() -> AsyncGenerator[Connection, None]:
     """
     FastAPI dependency — no account_id set (for unauthenticated endpoints).
@@ -324,9 +343,19 @@ async def get_db_dep() -> AsyncGenerator[Connection, None]:
     async with get_db() as conn:
         yield conn
 
+#  Dependency for Multi-Statement Write Transactions ──────────────────────
+async def get_rls_tx_conn(account_id: UUID = Depends(get_current_account_id) ):
+    """Yields a read/write connection wrapped inside an atomic transaction bound by RLS."""
+    async with get_transaction(account_id=account_id) as conn:
+        yield conn
+
+async def get_rls_conn(account_id: UUID = Depends(get_current_account_id)):
+    """Yields a writable connection with RLS set, but NO automatic transaction."""
+    async with get_db(account_id=account_id, readonly=False) as conn:
+        yield conn
 
 async def get_authed_read_db_dep(
-    account_id: UUID,
+    account_id: UUID = Depends(get_current_account_id),
 ) -> AsyncGenerator[Connection, None]:
     """Dependency for authenticated, read-only endpoints (dashboard loads)."""
     async with get_db(account_id=account_id, readonly=True) as conn:

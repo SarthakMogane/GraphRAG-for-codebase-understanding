@@ -159,7 +159,7 @@ async def get_auth_status(request: Request):
         raise HTTPException(status_code=401, detail="Invalid session")
  
     # One DB query with join — gets everything needed for the status response
-    async with get_authed_read_db_dep(account_id=account_uuid) as conn:
+    async with get_authed_read_db_dep() as conn:
         row = await conn.fetchrow(
             """
             SELECT
