@@ -14,28 +14,22 @@ Called after repos.py's /index endpoint returns {next: "scout"}.
 The frontend navigates to the scout page and calls POST /scout.
 """
 
-import dataclasses
 import logging
-from datetime import datetime, timezone
-from typing import Optional
 import json
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
-
 from src.schemas.requests import SelectionPayload
 from src.schemas.responses import SelectionResponse
 from src.core.config import get_settings
 from src.core.database import get_db
-from src.models.database import (
-    IngestionJob, JobType, Repository,
-    RepoScoutResult, RepoStatus, UserSelection,
-)
 from src.services.scout import DeepScout, RepoScoutResult as ScoutResult
 from src.services.github import GitHubService, InstallationCache
-# from src.workers.ingestion_task import run_ingestion
+from src.workers.ingestion_task import run_ingestion
 from src.utils.services_helpers import get_github_service ,_serialize_scout
-
-from  src.core.database import get_rls_conn ,get_authed_read_db_dep
+from  src.core.database import get_rls_conn ,get_authed_read_db_dep , get_rls_tx_conn
 from src.crud.repos_ops import _get_indexed_repos
+from src.crud.jobs import _execute_queue_insertion_raw
+from src.utils.services_helpers import get_current_account_id
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -204,4 +198,82 @@ async def get_scout(
         "scouted_at": repo["last_scout_at"].isoformat() if repo["last_scout_at"] else None,
         "scout": json.loads(cached_json),
     }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /repos/{id}/select — Phase 2 submission
+# ─────────────────────────────────────────────────────────────────────────────
+@router.post("/repos/{repo_id}/select", response_model=SelectionResponse)
+async def submit_selection(
+    repo_id: int,
+    payload: SelectionPayload, 
+    conn = Depends(get_rls_tx_conn),
+    account_id: UUID = Depends(get_current_account_id)):
+    """
+    Submit the user's checklist selections from Phase 2 UI.
+
+    Validates every selected path against the scout result — frontend
+    cannot submit a path that doesn't exist or wasn't selectable.
+
+    Saves to UserSelection table (upsert — replaces previous choices).
+
+    If start_immediately=True (default): queues ingestion right away.
+    If start_immediately=False: saves only, user must call /select/confirm.
+    """
+    repo = await conn.fetchrow("SELECT account_id, last_scout_sha, default_branch, repo_size_kb FROM repos WHERE id = $1", repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Target repository reference invalid.")
+
+    scout_row = await conn.fetchrow(
+        "SELECT id, scout_json FROM repo_scout_results WHERE repo_id = $1 AND head_sha = $2 LIMIT 1",
+        repo_id, repo["last_scout_sha"] or ""
+    )
+    if not scout_row:
+        raise HTTPException(status_code=400, detail="Prerequisite profile structure validation snapshot missing. Run scout invocation path first.")
+
+    scout_data = json.loads(scout_row["scout_json"])
+
+    # Validate subprojects paths
+    valid_subprojects = {sp["path"] for sp in scout_data.get("subprojects", [])}
+    invalid_sp = set(payload.selected_subprojects) - valid_subprojects
+    if invalid_sp:
+         raise HTTPException(status_code=422, detail=f"Selection vector configuration contains unauthorized path scopes: {sorted(invalid_sp)}")
+
+    # Validate submodules paths
+    SELECTABLE_OUTCOMES = {"private_full", "private_monorepo", "private_queued", "private_cross_link"}
+    valid_submodules = {sm["path"] for sm in scout_data.get("submodules", []) if sm.get("outcome") in SELECTABLE_OUTCOMES}
+    invalid_sm = set(payload.selected_submodules) - valid_submodules
+    if invalid_sm:
+         raise HTTPException(status_code=422, detail=f"Submodule path selection rejected due to insufficient account permissions or configuration properties: {sorted(invalid_sm)}")
+
+    # Raw high performance query mapping upsert execution pattern
+
+    selection_id = await conn.fetchval(
+        """
+        INSERT INTO user_selections (
+            repo_id, scout_result_id, selected_subprojects, selected_submodules, 
+            deselected_subprojects, deselected_submodules, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        ON CONFLICT (repo_id) DO UPDATE SET 
+            scout_result_id = EXCLUDED.scout_result_id,
+            selected_subprojects = EXCLUDED.selected_subprojects,
+            selected_submodules = EXCLUDED.selected_submodules,
+            deselected_subprojects = EXCLUDED.deselected_subprojects,
+            deselected_submodules = EXCLUDED.deselected_submodules,
+            updated_at = NOW()
+        RETURNING id
+        """,
+        repo_id, scout_row["id"], payload.selected_subprojects, payload.selected_submodules,
+        payload.deselected_subprojects, payload.deselected_submodules
+    )
+
+    job_id = None
+    if payload.start_immediately:
+        job_id = await _execute_queue_insertion_raw(conn, repo_id, repo, selection_id,account_id)
+
+    return SelectionResponse(
+        selection_id=selection_id, repo_id=repo_id, job_id=job_id,
+        selected_subprojects=payload.selected_subprojects, selected_submodules=payload.selected_submodules,
+        message="User selection boundaries synchronized successfully." + (f" Background ingestion execution worker spawned: Job ID {job_id}." if job_id else "")
+    )
+
 
