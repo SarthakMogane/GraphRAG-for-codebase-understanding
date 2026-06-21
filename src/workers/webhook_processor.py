@@ -47,10 +47,10 @@ async def process_webhook_event(
  
         if handler:
             await handler(payload)
-            await _mark_processed(delivery_id,processed=True)
+            await _mark_processed(delivery_id,processed=True,event_type=event_type , payload=payload)
         else:
             logger.debug("Unhandled webhook event type: %s", event_type)
-            await _mark_processed(delivery_id,processed=False, error="unhandled_event")
+            await _mark_processed(delivery_id,processed=False, error="unhandled_event",event_type=event_type,payload=payload)
     
     except TransientWebhookError as e:
         logger.warning(
@@ -58,7 +58,7 @@ async def process_webhook_event(
             delivery_id, e
         )
         # We save the error so we can see it in the DB, but leave processed=FALSE
-        await _mark_processed(delivery_id, processed=False, error=str(e))
+        await _mark_processed(delivery_id, processed=False, error=str(e),event_type=event_type , payload = payload)
         # BUBBLE UP: This tells the SQS consumer script NOT to delete the message
         raise e
  
@@ -67,6 +67,6 @@ async def process_webhook_event(
             "Permanent fatal error in webhook processor — delivery=%s: %s",
             delivery_id, e,
         )
-        await _mark_processed(delivery_id,processed=False, error=str(e))
+        await _mark_processed(delivery_id,processed=False, error=str(e),event_type=event_type , payload=payload)
 
 

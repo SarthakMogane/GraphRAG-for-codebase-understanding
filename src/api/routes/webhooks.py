@@ -1,14 +1,13 @@
 from fastapi import APIRouter, Request, HTTPException, Header , Depends
-import logging
+from src.core.logger import get_logger
 from src.utils.services_helpers import get_sqs_client
 from src.services.github import GitHubService
-from src.database.mock_db import MOCK_DB , MockRepository
 from src.core.database import get_system_transaction
 from src.core.config import get_settings
 import json
-import aioboto3
 
-logger = logging.getLogger(__name__)
+
+logger = get_logger(__name__)
 settings = get_settings()
 router = APIRouter(prefix="/api/webhooks", tags=["Webhooks"])
 
@@ -70,7 +69,7 @@ async def github_webhook(
                 INSERT INTO webhooks_received
                     (delivery_id, event_type, github_install_id,
                      repo_full_name, payload, processed)
-                VALUES ($1, $2, $3, $4, $5, FALSE)
+                VALUES ($1, $2, $3, $4, $5::jsonb, FALSE)
                 ON CONFLICT (delivery_id) DO NOTHING
                 """,
                 x_github_delivery,
