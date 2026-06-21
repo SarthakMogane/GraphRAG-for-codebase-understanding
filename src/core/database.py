@@ -41,7 +41,7 @@ from uuid import UUID
 import asyncpg
 from asyncpg import Connection, Pool
 from fastapi import HTTPException , Depends , Request
-
+from src.utils.services_helpers import get_current_account_id
 from src.core.config import get_settings
 from src.core.logger import get_logger
 
@@ -316,24 +316,6 @@ async def get_system_transaction() -> AsyncGenerator[Connection, None]:
 # FastAPI dependency injection
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def get_current_account_id(request: Request) -> UUID:
-    """
-    Extracts the tenant identity parameter directly from the active HTTP session.
-    Keeps the database framework decoupled from high-level auth utilities.
-    """
-    account_id_str = request.session.get("account_id")
-    if not account_id_str:
-        raise HTTPException(
-            status_code=401, 
-            detail="Access Denied: Missing active authentication session context."
-        )
-    try:
-        return UUID(account_id_str)
-    except ValueError:
-        raise HTTPException(
-            status_code=400, 
-            detail="Malformed Session Token: Multi-tenancy key type verification failure."
-        )
 
 async def get_db_dep() -> AsyncGenerator[Connection, None]:
     """
