@@ -24,7 +24,6 @@ from src.core.config import get_settings
 from src.core.database import get_db
 from src.services.scout import DeepScout, RepoScoutResult as ScoutResult
 from src.services.github import GitHubService, InstallationCache
-from src.workers.ingestion_task import run_ingestion
 from src.utils.services_helpers import get_github_service ,_serialize_scout
 from  src.core.database import get_rls_conn ,get_authed_read_db_dep , get_rls_tx_conn
 from src.crud.repos_ops import _get_indexed_repos
@@ -199,6 +198,7 @@ async def get_scout(
         "scout": json.loads(cached_json),
     }
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # POST /repos/{id}/select — Phase 2 submission
 # ─────────────────────────────────────────────────────────────────────────────
@@ -268,12 +268,58 @@ async def submit_selection(
 
     job_id = None
     if payload.start_immediately:
-        job_id = await _execute_queue_insertion_raw(conn, repo_id, repo, selection_id,account_id)
+        job_id = await _execute_queue_insertion_raw(conn, repo_id, selection_id,account_id)
 
     return SelectionResponse(
         selection_id=selection_id, repo_id=repo_id, job_id=job_id,
         selected_subprojects=payload.selected_subprojects, selected_submodules=payload.selected_submodules,
         message="User selection boundaries synchronized successfully." + (f" Background ingestion execution worker spawned: Job ID {job_id}." if job_id else "")
     )
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /repos/{id}/select
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/repos/{repo_id}/select")
+async def get_selection(
+    repo_id: int,
+    conn = Depends(get_authed_read_db_dep)
+):
+    """Return the current saved selections for a repo."""
+    
+    selection = await conn.fetchone(
+        """ 
+        SELECT 
+            id, 
+            selected_subprojects, 
+            selected_submodules, 
+            deselected_subprojects, 
+            deselected_submodules, 
+            updated_at 
+        FROM user_selections 
+        WHERE repo_id = $1
+        """,repo_id
+    )
+
+    if not selection:
+        raise HTTPException(
+            status_code=404,
+            detail="No selection saved yet for this repository",
+        )
+    return {
+        "selection_id":           selection["id"],
+        "selected_subprojects":   selection["selected_subprojects"] or [],
+        "selected_submodules":    selection["selected_submodules"] or [],
+        "deselected_subprojects": selection["deselected_subprojects"] or [],
+        "deselected_submodules":  selection["deselected_submodules"] or [],
+        "updated_at": (
+            selection["updated_at"].isoformat() if selection["updated_at"] else None
+        ),
+    }
+
+
+
 
 
