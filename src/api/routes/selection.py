@@ -319,6 +319,34 @@ async def get_selection(
         ),
     }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /repos/{id}/select/confirm
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/repos/{repo_id}/select/confirm")
+async def confirm_and_ingest(
+    repo_id: int,
+    conn = Depends(get_rls_tx_conn),
+    account_id:UUID = Depends(get_current_account_id)
+):
+    """
+    Start Phase 3 ingestion using the currently saved selections.
+    Called when user clicks "Confirm & Index" after reviewing the checklist.
+    """
+    repo = await conn.fetchrow("SELECT default_branch, repo_size_kb, last_scout_sha FROM repos WHERE id = $1", repo_id)
+    if not repo:
+         raise HTTPException(status_code=404, detail="Target repository reference index missing.")
+
+    selection = await conn.fetchrow("SELECT id FROM user_selections WHERE repo_id = $1", repo_id)
+    if not selection:
+        raise HTTPException(status_code=400, detail="No active saved component selection found.")
+
+    # Triggers the safety locked job runner
+    job_id = await _execute_queue_insertion_raw(conn, repo_id, selection["id"], account_id)
+
+    return {"job_id": job_id, "message": "Phase 3 background ingestion task initialized successfully."}
+
+
 
 
 
