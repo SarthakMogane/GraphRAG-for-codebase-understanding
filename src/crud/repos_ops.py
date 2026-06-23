@@ -6,6 +6,14 @@ from src.services.pre_clone.types import ValidationVerdict, RoutingDecision, Val
 
 logger = get_logger(__name__)
 
+async def _get_indexed_repos(conn) -> dict[str, int]:
+    "return the users indexed repos "
+    indexed_rows = await conn.fetch(
+            "SELECT owner_login, repo_name, id FROM repos WHERE index_status = 'ready'"
+        )
+
+    return {f"{r.github_owner}/{r.github_repo}": r.id for r in indexed_rows}
+
 async def _upsert_repos_in_conn(
     conn,
     repos: list[dict],
