@@ -254,21 +254,59 @@ async def _handle_refresh(
             # on the checklist. Previous selections are pre-filled.
         )
  
-    # ── Code-only change → silent re-ingest with saved selections ────────────
+     # If the user has disabled auto-sync to save their API tokens, we pause here.
+    auto_sync_enabled = repo.get("auto_sync_enabled", True)
+    commit_count = stale.commits_since_last_index if stale else 0
+
+    if not auto_sync_enabled:
+        logger.info(
+            "%s has code-only changes but auto-sync is OFF. Requiring manual confirmation.",
+            repo["full_name"]
+        )
+        # We do NOT create an ingestion job. We hand control back to the UI.
+        return {
+            "repo_id": repo_id,
+            "next": "manual_confirm",
+            "message": (
+                f"{repo['full_name']} has {commit_count} new commit(s). "
+                f"Auto-sync is disabled. Do you want to proceed and consume tokens?"
+            ),
+        }
+
+    # ── Code-only change → silent re-ingest ───────────────────────────
     logger.info(
-        "%s has code-only changes (%d commits) — silent re-ingest",
+        "%s has code-only changes (%d commits) — silent re-ingest via Outbox",
         repo["full_name"],
-        stale.commits_since_last_index if stale else 0,
+        commit_count,
+    )
+    # ── OUTBOX PATTERN: Insert as 'dispatch_pending' ──────────────────────────
+    job_id = await conn.fetchval(
+        """
+        INSERT INTO ingestion_jobs (
+            repo_id, account_id, selection_id, job_type, 
+            status, trigger_sha_before, trigger_sha_after, stale_type
+        ) VALUES ($1, $2, $3, 'refresh', 'dispatch_pending', $4, $5, 'code_only')
+        RETURNING id
+        """,
+        repo_id, 
+        repo["account_id"], 
+        saved_selection["id"], 
+        previous_sha, 
+        current_sha
+    )
+
+    await conn.execute(
+        "UPDATE repos SET index_status = 'pending', updated_at = NOW() WHERE id = $1", 
+        repo_id
     )
  
-    
     commit_count = stale.commits_since_last_index if stale else 0
-    return IndexResponse(
-        repo_id=repo_id,
-        next="ingest",
-        message=(
-            f"{repo.full_name} has {commit_count} new commit(s). "
+    return {
+        "repo_id": repo_id,
+        "next": "ingest",
+        "message": (
+            f"{repo['full_name']} has {commit_count} new commit(s). "
             f"Re-indexing with your saved configuration."
         ),
-        job_id=job_id,
-    )
+        "job_id": job_id,
+    }
