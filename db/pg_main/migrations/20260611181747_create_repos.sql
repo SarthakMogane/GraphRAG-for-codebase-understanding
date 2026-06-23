@@ -43,20 +43,10 @@ CREATE TABLE repos (
 
     -- Clone strategy used (from ingestion)
     clone_strategy      TEXT,                                   -- 'shallow' | 'partial_blob' | 'sparse'
-
+    auto_sync_enabled   BOOL NOT NULL DEFAULT FALSE
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    -- State Machine Constraint
-    CONSTRAINT valid_index_status CHECK (
-        index_status IN (
-            'not_indexed',   -- Brand new, waiting for user to click Index
-            'indexing',      -- Worker is currently running Tree-sitter
-            'ready',         -- GraphRAG is fully populated and queryable
-            'stale',         -- Code changed, needs re-indexing
-            'inaccessible'   -- User uninstalled app or removed repo access
-        )
-    )
 );
 
 
