@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Request , Depends 
+from fastapi import APIRouter, HTTPException, Request , Depends , Body
 from fastapi.responses import RedirectResponse
 from typing import List
 from src.services.github import GitHubService
@@ -12,8 +12,8 @@ from src.services.pre_clone.pipeline import PreClonePipeline
 from src.services.pre_clone.types import ValidationVerdict,RoutingDecision
 from src.utils.services_helpers import get_github_service
 from src.services.scout.check_structural_changes import _handle_refresh
-from src.utils.services_helpers import get_github_service
-from src.core.database import get_transaction
+from src.utils.services_helpers import get_github_service , get_current_account_id
+from src.core.database import get_transaction ,get_rls_tx_conn ,get_authed_read_db_dep
 from src.core.config import get_settings
 from src.core.logger import get_logger
 
@@ -24,121 +24,121 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api", tags=["Repositories"])
 
 @router.get("/repos")
-async def get_user_repos(request:Request):
+async def get_user_repos(
+    account_id :UUID = Depends(get_current_account_id),
+    conn = Depends(get_authed_read_db_dep)
+):
     """
     Purely observes the database state. Does NOT contact GitHub.
     """
-    account_id = request.session.get("account_id")
-    if not account_id:
-        return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=not_authenticated")
     
-    async with get_transaction(account_id=account_id) as conn:
+    async with get_authed_read_db_dep(account_id=account_id) as conn:
         repos = await conn.fetch(
             "SELECT * FROM repos WHERE account_id = $1 ORDER BY updated_at DESC", 
             account_id
         )
         return repos
 
-# Note: Changed from {full_name} to {owner}/{repo} so FastAPI parses it automatically for us!
-@router.get("/repos/{owner}/{repo}/branches", response_model=List[str])
-async def list_branches(owner: str,
-                        repo: str, 
-                        request: Request,
-                        github_service: GitHubService = Depends(get_github_service)):
-    """
-    Fetches the branches for a specific repository. 
-    Uses the App Installation Token (Server-to-Server) so it can run in the background.
-    """
-    # 1. Authenticate via explicit cookie (No more JWT Depends!)
-    github_id = request.session.get("auth_user_id")
-    if not github_id or github_id not in MOCK_DB["users"]:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+# # Note: Changed from {full_name} to {owner}/{repo} so FastAPI parses it automatically for us!
+# @router.get("/repos/{owner}/{repo}/branches", response_model=List[str])
+# async def list_branches(owner: str,
+#                         repo: str, 
+#                         request: Request,
+#                         github_service: GitHubService = Depends(get_github_service)):
+#     """
+#     Fetches the branches for a specific repository. 
+#     Uses the App Installation Token (Server-to-Server) so it can run in the background.
+#     """
+#     # 1. Authenticate via explicit cookie (No more JWT Depends!)
+#     github_id = request.session.get("auth_user_id")
+#     if not github_id or github_id not in MOCK_DB["users"]:
+#         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    # 2. Get the Installation ID 
-    installation_id = MOCK_DB.get("installations", {}).get(github_id)
-    if not installation_id:
-        raise HTTPException(status_code=403, detail="GitHub App not installed")
+#     # 2. Get the Installation ID 
+#     installation_id = MOCK_DB.get("installations", {}).get(github_id)
+#     if not installation_id:
+#         raise HTTPException(status_code=403, detail="GitHub App not installed")
 
-    try:
-        # 3. Call the APP-level service (Server-to-Server flow!)
-        # We don't pass the user token anymore, just the installation ID
-        branches = await github_service.get_repo_branches(
-            owner=owner, 
-            repo=repo, 
-            installation_id=installation_id
-        )
-        return branches
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch branches: {str(e)}")
+#     try:
+#         # 3. Call the APP-level service (Server-to-Server flow!)
+#         # We don't pass the user token anymore, just the installation ID
+#         branches = await github_service.get_repo_branches(
+#             owner=owner, 
+#             repo=repo, 
+#             installation_id=installation_id
+#         )
+#         return branches
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Failed to fetch branches: {str(e)}")
 
 
-@router.post("/repos/status")
-async def get_repos_status(
-    repo_names: list[str],   # ["myorg/repo1", "myorg/repo2"]
-    # db: AsyncSession = Depends(get_db),
-):
-    # result = await db.execute(
-    #     select(Repository).where(
-    #         Repository.full_name.in_(repo_names)
-    #     )
-    # )
-    # repos = {r.full_name: r for r in result.scalars().all()}
-    mock_repo_tables = MOCK_DB["repositories"]
-    print("debug : repo inside DB : \n",mock_repo_tables)
-    print("debug : repo list gotten by UI \n ",repo_names)
-    result = {}
-    for name in repo_names:
-        if name not in mock_repo_tables:
-            result[name] = {"status": "never_indexed", "action": "index"}
-            continue
+# @router.post("/repos/status")
+# async def get_repos_status(
+#     repo_names: list[str],   # ["myorg/repo1", "myorg/repo2"]
+#     # db: AsyncSession = Depends(get_db),
+# ):
+#     # result = await db.execute(
+#     #     select(Repository).where(
+#     #         Repository.full_name.in_(repo_names)
+#     #     )
+#     # )
+#     # repos = {r.full_name: r for r in result.scalars().all()}
+#     mock_repo_tables = MOCK_DB["repositories"]
+#     print("debug : repo inside DB : \n",mock_repo_tables)
+#     print("debug : repo list gotten by UI \n ",repo_names)
+#     result = {}
+#     for name in repo_names:
+#         if name not in mock_repo_tables:
+#             result[name] = {"status": "never_indexed", "action": "index"}
+#             continue
         
-        repo = mock_repo_tables[name]
-        status = repo.status
-        print(status)
-        if status is None:
-            result[name] = {"status": "never_indexed", "action": "index"}
+#         repo = mock_repo_tables[name]
+#         status = repo.status
+#         print(status)
+#         if status is None:
+#             result[name] = {"status": "never_indexed", "action": "index"}
 
-        elif status == RepoStatus.READY:
-            # Check webhook-flagged staleness (DB only, no API call)
-            if repo.is_stale:  # <--- Checked directly from your new DB column!
-                result[name] = {
-                    "status": "stale",
-                    "commits_since":repo.stale_commit_count,
-                    "last_indexed_at": repo.last_ingested_at,
-                    "last_indexed_sha": repo.last_ingested_sha,
-                    "action": "reindex",
-                }
-            else:
-                result[name] = {
-                    "status": "ready",
-                    "last_indexed_at": repo.last_ingested_at,
-                    "last_indexed_sha": repo.last_ingested_sha,
-                    "action": "view",
-            }
-        elif status == RepoStatus.AWAITING_UI:
-            result[name] = {"status": "setup_paused", "action": "resume"}
-        elif status in (RepoStatus.CLONING, RepoStatus.FILTERING,
-                        RepoStatus.MANIFESTING, RepoStatus.SUBMODULES):
-            result[name] = {"status": "indexing", "action": "none"}
-        elif status == RepoStatus.FAILED:
-            result[name] = {"status": "failed", "action": "retry"}
-        elif status == RepoStatus.STALE:
-            result[name] = {
-                "status": "stale",
-                "commits_since": repo.stale_commit_count,
-                "action": "reindex",
-            }
-        else:
-            result[name] = {"status": "pending", "action": "none"}
+#         elif status == RepoStatus.READY:
+#             # Check webhook-flagged staleness (DB only, no API call)
+#             if repo.is_stale:  # <--- Checked directly from your new DB column!
+#                 result[name] = {
+#                     "status": "stale",
+#                     "commits_since":repo.stale_commit_count,
+#                     "last_indexed_at": repo.last_ingested_at,
+#                     "last_indexed_sha": repo.last_ingested_sha,
+#                     "action": "reindex",
+#                 }
+#             else:
+#                 result[name] = {
+#                     "status": "ready",
+#                     "last_indexed_at": repo.last_ingested_at,
+#                     "last_indexed_sha": repo.last_ingested_sha,
+#                     "action": "view",
+#             }
+#         elif status == RepoStatus.AWAITING_UI:
+#             result[name] = {"status": "setup_paused", "action": "resume"}
+#         elif status in (RepoStatus.CLONING, RepoStatus.FILTERING,
+#                         RepoStatus.MANIFESTING, RepoStatus.SUBMODULES):
+#             result[name] = {"status": "indexing", "action": "none"}
+#         elif status == RepoStatus.FAILED:
+#             result[name] = {"status": "failed", "action": "retry"}
+#         elif status == RepoStatus.STALE:
+#             result[name] = {
+#                 "status": "stale",
+#                 "commits_since": repo.stale_commit_count,
+#                 "action": "reindex",
+#             }
+#         else:
+#             result[name] = {"status": "pending", "action": "none"}
 
-    return result
+#     return result
 
 
 @router.post("repos/{repo_id}/index",response_model=IndexResponse)
 async def index_repo(
     repo_id : int,
     request:Request,
-    db = Depends(get_transaction()),
+    db = Depends(get_rls_tx_conn()),
     _gh = Depends(get_github_service())
     ):
     """
@@ -247,7 +247,7 @@ async def index_repo(
     # ── 5. Fallback ─────────────────────────────────────────────────────
     logger.error("Unhandled routing decision: %s", result.routing)
     raise HTTPException(status_code=500, detail="Unexpected routing state")
- 
+
 
 # HTTP status mapping for pipeline verdicts
 # ─────────────────────────────────────────────────────────────────────────────
