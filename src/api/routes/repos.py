@@ -249,6 +249,46 @@ async def index_repo(
     raise HTTPException(status_code=500, detail="Unexpected routing state")
 
 
+@router.patch("/repos/{repo_id}/auto-sync")
+async def toggle_auto_sync(
+    repo_id: int,
+    # embed=True means the frontend sends: {"enabled": true}
+    enabled: bool = Body(..., embed=True), 
+    conn = Depends(get_rls_tx_conn),
+    account_id: UUID = Depends(get_current_account_id)
+):
+    """
+    Toggle the auto_sync_enabled flag for a repository.
+    RLS (Row-Level Security) guarantees users can only update their own repos.
+    """
+    
+    # 1. Update the repository
+    result = await conn.execute(
+        """
+        UPDATE repos 
+        SET auto_sync_enabled = $1, 
+            updated_at = NOW() 
+        WHERE id = $2
+        """,
+        enabled,
+        repo_id
+    )
+    
+    # 2. Check if the repo actually existed and belonged to the user
+    # asyncpg's execute returns a string like "UPDATE 1" or "UPDATE 0"
+    if result == "UPDATE 0":
+        raise HTTPException(
+            status_code=404, 
+            detail="Repository not found or you do not have permission to modify it."
+        )
+
+    action = "enabled" if enabled else "disabled"
+    return {
+        "status": "success",
+        "message": f"Auto-sync has been {action}.",
+        "auto_sync_enabled": enabled
+    }
+
 # HTTP status mapping for pipeline verdicts
 # ─────────────────────────────────────────────────────────────────────────────
  
