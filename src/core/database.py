@@ -23,24 +23,18 @@ Usage:
     # FastAPI dependency
     async with get_db() as conn:
         row = await conn.fetchrow("SELECT * FROM repos WHERE id=$1", repo_id)
-
-    # Background task (Celery)
-    with get_sync_db() as conn:
-        conn.execute("UPDATE repos SET status=$1 WHERE id=$2", "ready", repo_id)
 """
 
 from __future__ import annotations
-
-import logging
 import ssl
 import time
 from contextlib import asynccontextmanager, contextmanager
-from typing import AsyncGenerator, Generator, Optional
+from typing import AsyncGenerator, Optional
 from uuid import UUID
 
 import asyncpg
 from asyncpg import Connection, Pool
-from fastapi import HTTPException , Depends , Request
+from fastapi import Depends
 from src.utils.services_helpers import get_current_account_id
 from src.core.config import get_settings
 from src.core.logger import get_logger
@@ -74,17 +68,14 @@ def _build_ssl_context() -> ssl.SSLContext:
     In development:
       - CERT_NONE if RDS_CA_BUNDLE not set (local postgres without SSL)
     """
-    if not settings.RDS_CA_BUNDLE_PATH:
-        if settings.APP_ENV == "production":
+    if settings.APP_ENV == "development" or not settings.RDS_CA_BUNDLE_PATH:
+        if settings.APP_ENV in ("stagging","production") and not settings.RDS_CA_BUNDLE_PATH:
             raise RuntimeError(
                 "RDS_CA_BUNDLE_PATH must be set in production. "
                 "Download from https://truststore.pki.rds.amazonaws.com/"
             )
         # Development: no SSL verification
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        return ctx
+        return None
 
     ctx = ssl.create_default_context(cafile=settings.RDS_CA_BUNDLE_PATH)
     ctx.verify_mode = ssl.CERT_REQUIRED
@@ -153,7 +144,7 @@ async def create_pools() -> None:
 
     # Write pool — primary RDS instance
     _write_pool = await asyncpg.create_pool(
-        dsn=settings.DATABASE_URL,
+        dsn=settings.PYTHON_DATABASE_URL,
         ssl=ssl_ctx,
         min_size=settings.DB_POOL_MIN_SIZE,
         max_size=settings.DB_POOL_MAX_SIZE,

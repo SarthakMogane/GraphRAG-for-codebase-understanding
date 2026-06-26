@@ -138,8 +138,8 @@ async def get_user_repos(
 async def index_repo(
     repo_id : int,
     request:Request,
-    db = Depends(get_rls_tx_conn()),
-    _gh = Depends(get_github_service())
+    db = Depends(get_rls_tx_conn),
+    _gh = Depends(get_github_service)
     ):
     """
     Entry point for all indexing actions from the dashboard.

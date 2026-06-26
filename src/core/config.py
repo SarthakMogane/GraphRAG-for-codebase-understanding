@@ -45,8 +45,9 @@ class Settings(BaseSettings):
 
         # ── PostgreSQL ───────────────────────────────────────────────────
     DATABASE_URL: str                    # postgresql+asyncpg://user:pass@host/db
+    PYTHON_DATABASE_URL: str
     DB_POOL_MIN_SIZE: int = 20
-    DB_POOL_MIN_SIZE: int = 10
+    DB_POOL_MAX_SIZE: int = 10
 
     DATABASE_READ_URL:str
     DB_READ_POOL_MIN_SIZE:int =20
@@ -60,7 +61,10 @@ class Settings(BaseSettings):
     AWS_REGION:str
     APP_ENV:str
 
-    
+    #sqs
+    SQS_WEBHOOK_QUEUE_URL:str
+    SQS_INGESTION_QUEUE_URL:str
+
     # App Settings
         # ── Redis (Celery broker + result backend) ───────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"

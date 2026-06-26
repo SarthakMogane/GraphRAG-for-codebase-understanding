@@ -246,7 +246,7 @@ async def _handle_refresh(
             repo_id=repo_id,
             next="scout",
             message=(
-                f"{repo["full_name"]} has structural changes since last index. "
+                f"{repo.full_name} has structural changes since last index. "
                 f"Review the updated structure below."
             ),
             structural_diff=structural_diff,

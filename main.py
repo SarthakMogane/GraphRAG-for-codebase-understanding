@@ -27,7 +27,7 @@ import asyncio
 import aioboto3
 
 from src.core.config import get_settings
-from src.api.routes import auth, chat, evaluation , webhooks,repos
+from src.api.routes import auth, webhooks,repos
 from src.utils.llm_client import LangChainClient
 from src.indexing.vector_store import VectorStore
 from src.indexing.community_detection import CommunityDetector
@@ -129,9 +129,11 @@ import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from src.services.github import GitHubService
+from src.core.database import create_pools , close_pools
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await create_pools()
     app.state.aws_session = aioboto3.session()
     client_ctx = app.state.aws_session.client("sqs", region_name=settings.AWS_REGION)
     app.state.sqs_client = await client_ctx.__aenter__()
@@ -140,6 +142,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    await close_pools()
     # Teardown
     await app.state.github_service.close()
  # ── Shutdown: Cleanly close the connection pool ──
@@ -244,8 +247,8 @@ async def add_process_time_header_and_log(request: Request, call_next):
 # Include all modular routers
 app.include_router(auth.router)
 app.include_router(repos.router)
-app.include_router(chat.router)
-app.include_router(evaluation.router)
+# app.include_router(chat.router)
+# app.include_router(evaluation.router)
 app.include_router(webhooks.router)
 
 @app.get("/", response_class=FileResponse, tags=["UI"])

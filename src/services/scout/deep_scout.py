@@ -47,7 +47,7 @@ import httpx
 from src.core.config import get_settings
 from src.models.database import SubmoduleOutcome
 from src.services.github import GitHubService, InstallationCache
-from src.services.pre_clone.types import MonorepoDetectionResult, SubProjectDecision
+from src.services.pre_clone.types import MonorepoDetectionResult, SubProjectScore
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -764,7 +764,7 @@ class DeepScout:
                 path=sp.path,
                 name=sp.name,
                 score=sp.composite_score,
-                auto_selected=(sp.decision == SubProjectDecision.FULL_INGEST),
+                auto_selected=(sp.decision == SubProjectScore.FULL_INGEST),
                 source_file_count=sp.source_file_count,
                 has_entry_point=sp.has_entry_point,
                 dependent_count=sp.dependent_count,
