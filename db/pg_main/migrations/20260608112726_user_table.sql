@@ -1,7 +1,7 @@
 -- migrate:up
 CREATE TYPE user_role AS ENUM ('owner','admin','member','viewer');
 
-USERS TABLE (Identity & Auth)
+-- USERS TABLE (Identity & Auth)
 
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT uuidv7(),
@@ -16,7 +16,7 @@ CREATE TABLE users (
     oauth_token_expires TIMESTAMPTZ,
     refresh_token_enc   BYTEA,                                  -- encrypted refresh token
 
-    role user_role NOT NULL DEFAULT 'owner'
+    role user_role NOT NULL DEFAULT 'owner',
     avatar_url TEXT,
 
     -- Profile preferences (stored in user_settings table for extensibility)
@@ -30,13 +30,13 @@ CREATE TABLE users (
 
 
 --RLS 
-ALTER users ENABLE ROW LEVEL SECURITY , FORCE ROW LEVEL SECURITY;
+ALTER TABLE users ENABLE ROW LEVEL SECURITY , FORCE ROW LEVEL SECURITY;
 
 
 -- migrate:down
 
 -- drop RLS 
-ALTER users DISABLE ROW LEVEL SECURITY , NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE users DISABLE ROW LEVEL SECURITY , NO FORCE ROW LEVEL SECURITY;
 -- drop tables 
 DROP TABLE IF EXISTS users;
 --- drop types 

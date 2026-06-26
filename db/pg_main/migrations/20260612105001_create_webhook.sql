@@ -13,23 +13,23 @@ CREATE TABLE webhooks_received (
     processed_at        TIMESTAMPTZ,
     error               TEXT,                                   -- if processing failed
 
-    received_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    received_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 --policy
-ALTER webhooks_received ENABLE ROW LEVEL SECURITY
+ALTER TABLE webhooks_received ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY webhook_isolation on webhooks_received
 FOR ALL TO fastapi_app_user
-USING (current_setting("app.is_system_flow",true)='true')
+USING (current_setting('app.is_system_flow',true)='true')
 WITH CHECK (
 -- Ensure writes/inserts are also strictly bound to the system context
         current_setting('app.is_system_flow', true) = 'true'
     );
 
 -- migrate:down
-ALTER webhooks_received DISABLE ROW LEVEL SECURITY
+ALTER TABLE DISABLE ROW LEVEL SECURITY;
 
-DROP POLICY IF EXISTS webhook_isolation
-DROPT TABEL IF EXISTS webhooks_received
+DROP POLICY IF EXISTS webhook_isolation;
+DROP TABLE IF EXISTS webhooks_received;

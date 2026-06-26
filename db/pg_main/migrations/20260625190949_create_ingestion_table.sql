@@ -1,6 +1,10 @@
 -- migrate:up
+-- type 
+CREATE TYPE job_type AS ENUM ('initial', 'refresh', 'forced');
+CREATE TYPE job_status AS ENUM ('dispatch_pending','queued', 'running', 'completed', 'failed', 'cancelled');
 -- INGESTION JOBS (Outbox & SQS Optimized)
 -- -----------------------------------------------------------------------------
+
 CREATE TABLE ingestion_jobs (
     id                  UUID        PRIMARY KEY DEFAULT uuidv7(),
     repo_id             UUID         NOT NULL REFERENCES repos(id) ON DELETE CASCADE, 
@@ -43,17 +47,19 @@ CREATE POLICY ingestion_jobs_isolation_policy ON ingestion_jobs
 FOR ALL 
 TO fastapi_app_user
 USING (
-    account_id = current_settings("app.current_account_id",TRUE)::uuid
+    account_id = current_setting('app.current_account_id',true)::uuid
     OR
-    current_setting("app.is_system_flow",TRUE) = "true")
+    current_setting('app.is_system_flow',TRUE) = 'true')
 WITH CHECK (
-    account_id = current_setting("app.current_account_id",TRUE)::uuid
+    account_id = current_setting('app.current_account_id',true)::uuid
     OR 
-    current_setting("app.is_system_flow",TRUE)= "true");
+    current_setting('app.is_system_flow',TRUE)= 'true');
 
 -- migrate:down
 
-ALTER ingestion_jobs DISABLE ROW LEVEL SECURITY , NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE ingestion_jobs DISABLE ROW LEVEL SECURITY , NO FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS ingestion_jobs_isolation_policy;
 DROP TABLE IF EXISTS ingestion_jobs;
+DROP TYPE IF EXISTS job_status;
+DROP TYPE IF EXISTS job_type;

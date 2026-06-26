@@ -24,13 +24,13 @@ CREATE TABLE installations (
 );
 
 ---RLS 
-ALTER installations ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
+ALTER TABLE installations ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
 
 --POLICY
 
 CREATE POLICY installation_isolation ON installations
     FOR ALL TO fastapi_app_user
-    USING (account_id = current_settings('app.current_account_id',true)::uuid
+    USING (account_id = current_setting('app.current_account_id',true)::uuid
              -- Condition 2: Automated Background Worker (SQS/Celery traffic)
             OR current_setting('app.is_system_flow', true) = 'true'
     );
@@ -38,7 +38,7 @@ CREATE POLICY installation_isolation ON installations
 
 -- migrate:down
 
-ALTER installation DISABLE ROW LEVEL SECURITY , NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE installation DISABLE ROW LEVEL SECURITY , NO FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS installation_isolation;
 DROP TABLE IF EXISTS installations;

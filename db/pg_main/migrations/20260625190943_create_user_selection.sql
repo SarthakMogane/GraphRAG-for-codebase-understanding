@@ -25,20 +25,20 @@ ALTER TABLE user_selections ENABLE ROW LEVEL SECURITY , FORCE ROW LEVEL SECURITY
 CREATE POLICY selections_isolation_policy ON user_selections
     FOR ALL TO fastapi_app_user
     USING (
-        account_id = current_setting("app.current_account_id",true)::uuid
+        account_id = current_setting('app.current_account_id',true)::uuid
         OR 
-        current_setting("app.is_system_flow",true) = "true"
+        current_setting('app.is_system_flow',true) = 'true'
     )
     WITH CHECK (
-        account_id = current_setting("app.current_id",true)::uuid
+        account_id = current_setting('app.current_id',true)::uuid
         OR 
-        current_setting("app.is_system_flow",true) = "true"
+        current_setting('app.is_system_flow',true) = 'true'
     );
 
 
 
 -- migrate:down
-ALTER user_selections DISABLE ROW LEVEL SECURITY , NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE user_selections DISABLE ROW LEVEL SECURITY , NO FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS selections_isolation_policy;
 DROP TABLE IF EXISTS user_selections;

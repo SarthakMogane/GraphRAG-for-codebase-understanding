@@ -28,7 +28,7 @@ CREATE POLICY scout_results_isolation_policy ON repo_scout_results
     );
 
 -- migrate:down
-ALTER repo_scout_results DISABLE ROW LEVEL SECURITY , NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE repo_scout_results DISABLE ROW LEVEL SECURITY , NO FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS scout_results_isolation_policy;
 DROP TABLE IF EXISTS repo_scout_results;

@@ -9,7 +9,7 @@ CREATE TYPE repo_status   AS ENUM (
 );
 
 CREATE TYPE structure_type   AS ENUM ('flat', 'monorepo', 'has_submodules', 'mono_with_submodules');
-
+CREATE TYPE staleness_type   AS ENUM ('code_only', 'structural');
 ---create table 
 CREATE TABLE repos (
     id                  UUID        PRIMARY KEY DEFAULT uuidv7(),
@@ -43,33 +43,33 @@ CREATE TABLE repos (
 
     -- Clone strategy used (from ingestion)
     clone_strategy      TEXT,                                   -- 'shallow' | 'partial_blob' | 'sparse'
-    auto_sync_enabled   BOOL NOT NULL DEFAULT FALSE
+    auto_sync_enabled   BOOL NOT NULL DEFAULT FALSE,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 
 --- create policy 
 
-ALTER repos ENABLE ROW LEVEL SECURITY,FORCE ROW LEVEL SECURITY
+ALTER TABLE repos ENABLE ROW LEVEL SECURITY,FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY repos_tenant_isolation ON repos
 FOR ALL TO fastapi_app_user
 USING(
-    account_id = current_setting("app.current_account_id",true)::uuid
+    account_id = current_setting('app.current_account_id',true)::uuid
     OR 
-    current_setting('app.is_system_flow',true)="true"
-)
+    current_setting('app.is_system_flow',true)='true'
+);
 
 -- migrate:down
 
-ALTER repos DISABLE ROW LEVEL SECURITY,NO FORCE ROW LEVEL SECURITY
-DROP POLICY IF EXISTS repos_tenant_isolation
-DROP TABLE IF EXISTS repos
-DROP EXTENSION IF EXISTS citext
-DROP TYPE IF EXISTS repo_status
-DROP TYPE IF EXISTS structure_type
+ALTER TABLE repos DISABLE ROW LEVEL SECURITY,NO FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS repos_tenant_isolation;
+DROP TABLE IF EXISTS repos;
+DROP EXTENSION IF EXISTS citext;
+DROP TYPE IF EXISTS repo_status;
+DROP TYPE IF EXISTS structure_type;
+DROP TYPE IF EXISTS staleness_type;
 
 
 

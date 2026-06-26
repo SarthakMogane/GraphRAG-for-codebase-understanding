@@ -27,23 +27,23 @@ CREATE TABLE user_settings (
 );
 
 ---RLS 
-ALTER user_settings ENABLE ROW LEVEL SECURITY , FORCE ROW LEVEL SECURITY;
+ALTER TABLE user_settings ENABLE ROW LEVEL SECURITY , FORCE ROW LEVEL SECURITY;
 
 --- policy
 CREATE POLICY settings_manage ON user_settings
 FOR ALL TO fastapi_app_user
-USING (id = current_setting('app.current_user_id',true)::uuid)
-WITH CHECK ( id = current_setting('app.current_user_id',true)::uuid);
+USING (user_id = current_setting('app.current_user_id',true)::uuid)
+WITH CHECK ( user_id = current_setting('app.current_user_id',true)::uuid);
 
 
 CREATE POLICY auth_settings_manage ON user_settings
 FOR INSERT TO fastapi_app_user
-WITH CHECK (current_settings('app.is_auth_flow',true)= 'true');
+WITH CHECK (current_setting('app.is_auth_flow',true)= 'true');
 
 
 
 -- migrate:down
-ALTER user_settings DISABLE ROW LEVEL SECURITY, NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE user_settings DISABLE ROW LEVEL SECURITY, NO FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS settings_manage;
 DROP POLICY IF EXISTS auth_settings_manage;
 DROP TABLE IF EXISTS user_settings;
