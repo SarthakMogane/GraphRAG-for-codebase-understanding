@@ -134,7 +134,7 @@ from src.core.database import create_pools , close_pools
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await create_pools()
-    app.state.aws_session = aioboto3.session()
+    app.state.aws_session = aioboto3.Session()
     client_ctx = app.state.aws_session.client("sqs", region_name=settings.AWS_REGION)
     app.state.sqs_client = await client_ctx.__aenter__()
     
