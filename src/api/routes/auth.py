@@ -1,5 +1,5 @@
 from src.database.mock_db import MOCK_DB
-from fastapi import APIRouter, Request, HTTPException ,Depends
+from fastapi import APIRouter, Request, HTTPException ,Depends , Query
 from fastapi.responses import RedirectResponse,JSONResponse
 from authlib.integrations.starlette_client import OAuth
 from src.core.config import get_settings 
@@ -97,7 +97,7 @@ async def auth_github_callback(request: Request):
 
     existing_installs = []
     if not isinstance(installations_resp, Exception) and installations_resp.status_code == 200:
-        existing_install = installations_resp.json().get("installations", [])
+        existing_installs = installations_resp.json().get("installations", [])
 
     # encrypting token 
     oauth_token_enc   = await encrypt_token(oauth_token)
@@ -219,33 +219,50 @@ async def redirect_to_github_install(request: Request):
 @router.get("/github/setup-redirect")
 async def github_app_setup_redirect(
     request: Request, 
-    installation_id: str = None,
-    setup_action: str = "install", 
-    state: str = None
+    installation_id: int = Query(None), 
+    setup_action: str = Query("install"), 
+    state: str = Query(None)
 ):
     # 1. Initial Installation (Triggered from your App)
     if setup_action == "install":
         session_state = request.session.pop("github_install_state", None)
-        account_id = request.session.get("account_id")
-        account_uuid = UUID(account_id)
+        account_id_raw= request.session.get("account_id")
+        account_uuid = UUID(account_id_raw)
 
-        if not session_state or state != session_state:
-            logger.warning("CSRF state mismatch on app install redirect")
-            request.session.clear()
-            return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=csrf_failed")
+        # CSRF & MARKETPLACE LOGIC
+        if state:
+            if not session_state or state != session_state:
+                logger.warning("CSRF state mismatch on app install redirect")
+                request.session.clear()
+                return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=csrf_failed")
 
-        is_new_install = await _save_installation(account_id =account_uuid ,installion_id =installation_id)  
 
-        return RedirectResponse(url=f"{settings.FRONTEND_URL}?status=installed&new_install={str(is_new_install).lower()}")
+        if not account_id_raw:
+            # They installed from Marketplace but aren't logged into our app.
+            return RedirectResponse(url=f"{settings.FRONTEND_URL}/login?notice=finish_github_install")
+        
+        try:
+            account_uuid = UUID(account_id_raw)
+        
+            is_new_install = await _save_installation(
+                account_id=account_uuid, 
+                installation_id=installation_id
+            )
+        except Exception as e:
+            logger.error(f"Failed optimistic installation save for {installation_id}: {e}")
+            is_new_install = False # Graceful fallback if the DB blips
 
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}?status=installed&new_install={str(is_new_install).lower()}"
+        )
+    
     # 2. Permissions Update (Triggered from GitHub Settings)
     elif setup_action == "update":
         return RedirectResponse(url=f"{settings.FRONTEND_URL}?status=updated")
 
     # 3. Fallback for anomalous requests
     else:
-        # If they somehow got here with missing or weird parameters, 
-        # kick them back to the frontend to let the standard auth check handle them.
+        # If they somehow got here with missing or weird parameters
         return RedirectResponse(url=settings.FRONTEND_URL)
 
 @router.post("/logout")
