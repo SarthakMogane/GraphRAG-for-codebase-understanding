@@ -57,7 +57,7 @@ async def _recover_installations(
 
 async def _save_installation(
     account_id:UUID ,
-    installation_id:str
+    installation_id:int
         ) -> bool:
     """
     save installation id in installtions table using account id of current
@@ -68,11 +68,12 @@ async def _save_installation(
     async with get_transaction(account_id=account_id) as conn:
         result = await conn.execute(
             """
-            INSERT INTO installations (account_id, github_install_id)
-            VALUES ($1, $2)
+            INSERT INTO installations (account_id, github_install_id,is_active)
+            VALUES ($1, $2 , True)
             ON CONFLICT (github_install_id) 
             DO UPDATE SET 
                 account_id = EXCLUDED.account_id,
+                is_active = TRUE,
                 updated_at = NOW();
             """,account_id,installation_id )
         
