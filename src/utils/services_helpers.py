@@ -1,28 +1,42 @@
 from src.services.github import GitHubService
 from src.services.scout.deep_scout import RepoScoutResult as ScoutResult
-from fastapi import Request , HTTPException
+from fastapi import Request , HTTPException , Depends, BaseModel
 import dataclasses
 from uuid import UUID
 
+class AuthSession(BaseModel):
+    user_id: UUID
+    account_id: UUID
 
-async def get_current_account_id(request: Request) -> UUID:
-    """
-    Extracts the tenant identity parameter directly from the active HTTP session.
-    Keeps the database framework decoupled from high-level auth utilities.
-    """
-    account_id_str = request.session.get("account_id")
-    if not account_id_str:
-        raise HTTPException(
-            status_code=401, 
-            detail="Access Denied: Missing active authentication session context."
-        )
+# 2. The Core Dependency (Does the heavy lifting and validation)
+def get_auth_session(request: Request) -> AuthSession:
+    user_id_raw = request.session.get("user_id")
+    account_id_raw = request.session.get("account_id")
+    
+    if not user_id_raw or not account_id_raw:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+        
     try:
-        return UUID(account_id_str)
-    except ValueError:
-        raise HTTPException(
-            status_code=400, 
-            detail="Malformed Session Token: Multi-tenancy key type verification failure."
+        return AuthSession(
+            user_id=UUID(user_id_raw),
+            account_id=UUID(account_id_raw)
         )
+    except ValueError:
+        request.session.clear()
+        raise HTTPException(status_code=401, detail="Invalid session")
+
+def get_current_account_id(session: AuthSession = Depends(get_auth_session)) -> UUID:
+    """
+    Endpoints in database.py, repos.py, etc., can keep calling Depends(get_current_account_id).
+    FastAPI will automatically run get_auth_session first, then just return the account_id!
+    """
+    return session.account_id
+
+def get_current_user_id(session: AuthSession = Depends(get_auth_session)) -> UUID:
+    """
+    Just in case you ever have an endpoint that ONLY needs the user_id.
+    """
+    return session.user_id
     
 def get_github_service(request: Request) -> GitHubService:
     """

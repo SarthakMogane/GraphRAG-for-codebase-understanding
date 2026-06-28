@@ -5,8 +5,8 @@ from authlib.integrations.starlette_client import OAuth
 from src.core.config import get_settings 
 from src.core.logger import get_logger
 from src.core.crypto import encrypt_token, decrypt_token
-from src.utils.services_helpers import get_github_service
 from src.utils.auth_helpers import _parse_token_expiry
+from src.utils.services_helpers import get_auth_session , AuthSession
 from src.services.github import GitHubService
 from src.services.github_oauth import oauth
 from src.crud.user import _upsert_user
@@ -132,9 +132,11 @@ async def auth_github_callback(request: Request):
 
     return RedirectResponse(url=redirect_url , status_code=302)
 
-
 @router.get("/status")
-async def get_auth_status(request: Request):
+async def get_auth_status(
+    session: AuthSession = Depends(get_auth_session),
+    conn = Depends(get_authed_read_db_dep)
+):
     """
     Fast session check. Called by frontend to know:
       - Is user logged in?
@@ -144,19 +146,7 @@ async def get_auth_status(request: Request):
     Only reads from session (no DB query) for the auth check itself.
     Then does ONE DB query for display info (username, plan, install status).
     """
-    user_id    = request.session.get("user_id")
-    account_id = request.session.get("account_id")
- 
-    if not user_id or not account_id:
-        raise HTTPException(status_code=401, detail="Not authenticated")
- 
-    try:
-        user_uuid    = UUID(user_id)
-        account_uuid = UUID(account_id)
-    except ValueError:
-        # Malformed session value — clear and reject
-        request.session.clear()
-        raise HTTPException(status_code=401, detail="Invalid session")
+
  
     # One DB query with join — gets everything needed for the status response
     async with get_authed_read_db_dep() as conn:
@@ -180,12 +170,10 @@ async def get_auth_status(request: Request):
             WHERE u.id = $1
               AND u.account_id = $2
             """,
-            user_uuid, account_uuid,
+            session.user_id, session.account_id,
         )
  
     if not row:
-        # User in session but not in DB — session is stale
-        request.session.clear()
         raise HTTPException(status_code=401, detail="Session expired")
  
     return {
@@ -204,7 +192,9 @@ async def get_auth_status(request: Request):
 async def redirect_to_github_install(request: Request):
     """The frontend calls this when the user actively clicks 'Connect GitHub'"""
     user_id = request.session.get("user_id")
-    if not user_id:
+    account_id = request.session.get("account_id")
+
+    if not user_id or not account_id:
         return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=not_authenticated")
     
     install_state = secrets.token_urlsafe(32)  
