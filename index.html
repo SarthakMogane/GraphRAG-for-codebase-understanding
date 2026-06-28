@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>GraphRAG Code Assistant</title>
-
 <style>
 body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; max-width:1000px; margin:40px auto; padding:20px; line-height:1.6; background:#0d1117; color:white; }
 .hidden { display:none !important; }
@@ -12,34 +11,37 @@ body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,
 input[type="text"], input[type="password"] { width:100%; padding:12px; margin:10px 0; border:1px solid #30363d; border-radius:8px; background:#0d1117; color:white; box-sizing:border-box; }
 button.primary { background:#238636; color:white; border:none; padding:12px 20px; border-radius:8px; cursor:pointer; font-size:16px; font-weight:bold; }
 button.primary:hover { background:#2ea043; }
-#chat-box { height:300px; overflow-y:scroll; border:1px solid #30363d; padding:10px; margin-bottom:10px; border-radius:8px; background:#0d1117; }
-.msg { margin-bottom:10px; padding:10px; border-radius:8px; }
-.user-msg { background:#1f6feb33; text-align:right; }
-.ai-msg { background:#23863622; }
-.spinner { display:inline-block; width:20px; height:20px; border:3px solid rgba(255,255,255,.3); border-radius:50%; border-top-color:#fff; animation:spin 1s ease-in-out infinite; }
-@keyframes spin { to { transform:rotate(360deg); } }
+button.secondary { background:#21262d; border:1px solid #30363d; color:white; padding:12px 20px; border-radius:8px; cursor:pointer; font-size:16px; font-weight:bold; }
+button.secondary:hover { background:#30363d; }
 
-/* REPO DASHBOARD UI */
+/* REPO DASHBOARD */
 .repo-list { display:flex; flex-direction:column; gap:16px; }
 .repo-card { background:#161b22; border:1px solid #30363d; border-radius:18px; padding:20px; display:flex; justify-content:space-between; align-items:center; }
 .repo-left { display:flex; gap:18px; align-items:flex-start; }
 .repo-icon { width:56px; height:56px; border-radius:14px; background:#0d1117; display:flex; align-items:center; justify-content:center; font-size:24px; }
-.repo-content { display:flex; flex-direction:column; }
-.repo-name { font-size:22px; font-weight:700; }
+.repo-name { font-size:20px; font-weight:700; }
 .repo-meta { color:#8b949e; font-size:14px; }
 .repo-right { display:flex; align-items:center; gap:16px; }
-.badge { padding:7px 14px; border-radius:999px; font-size:14px; font-weight:700; }
+.repo-btn { background:#21262d; border:1px solid #30363d; color:white; padding:10px 18px; border-radius:10px; font-size:14px; font-weight:700; cursor:pointer; }
+.repo-btn:hover { background:#30363d; }
+
+/* BADGES */
+.badge { padding:6px 12px; border-radius:999px; font-size:13px; font-weight:700; }
 .badge-indexed { background:#16361f; color:#56d364; }
 .badge-stale { background:#3d2e0f; color:#f5b642; }
-.badge-indexing { background:#173b63; color:#58a6ff; }
-.badge-paused { background:#333; color:#ddd; }
 .badge-not-indexed { background:#2d333b; color:#c9d1d9; }
-.badge-failed { background:#4d1f1f; color:#ff7b72; }
-.repo-btn { background:#21262d; border:1px solid #30363d; color:white; padding:10px 18px; border-radius:10px; font-size:15px; font-weight:700; cursor:pointer; }
-.repo-btn:hover { background:#30363d; }
-.progress { width:120px; height:8px; border-radius:999px; background:#30363d; overflow:hidden; }
-.progress-bar { width:70%; height:100%; background:#58a6ff; }
-.small-text { color:#8b949e; font-size:13px; }
+.score-badge { background:#16361f; color:#56d364; font-family:monospace; font-size:12px; padding:2px 6px; border-radius:4px; }
+
+/* SCOUT UI */
+.scout-header { margin-bottom: 20px; border-bottom: 1px solid #30363d; padding-bottom: 10px; }
+.scout-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #21262d; }
+.scout-item-left { display: flex; align-items: center; gap: 12px; }
+.scout-item input[type="checkbox"] { width: 18px; height: 18px; accent-color: #238636; }
+.scout-item-title { font-weight: 600; font-size: 15px; }
+.scout-item-meta { color: #8b949e; font-size: 13px; margin-left: 8px; }
+
+.spinner { display:inline-block; width:20px; height:20px; border:3px solid rgba(255,255,255,.3); border-radius:50%; border-top-color:#fff; animation:spin 1s ease-in-out infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -48,72 +50,74 @@ button.primary:hover { background:#2ea043; }
 
 <div id="login-section" class="card hidden">
     <h2>Welcome to the demo</h2>
-    <p>Login with GitHub to select a repository you want to analyze.</p>
-    <button class="primary" onclick="window.location.href='http://127.0.0.1:8000/auth/login'">Login with GitHub</button>
-</div>
-
-<div id="profile-section" class="card hidden" style="display: flex; justify-content: space-between; align-items: center;">
-    <h2 style="margin: 0;">Welcome, <span id="user-name"></span>!</h2>
-    <a href="#" onclick="frontendLogout(event)" style="color: #ff7b72; font-weight: bold; text-decoration: none;">Logout ↗</a>
+    <button class="primary" onclick="window.location.replace('http://127.0.0.1:8000/auth/login')">Login with GitHub</button>
 </div>
 
 <div id="connect-section" class="card hidden" style="text-align:center;">
     <h2>Connect your Code</h2>
-    <p>To analyze your codebase, you need to grant the GraphRAG engine read-access to your repositories.</p>
     <button class="primary" onclick="waitForInstall()">Connect GitHub Repositories</button>
 </div>
 
 <div id="setup-section" class="card hidden">
-    <h3>1. Enter your OpenAI Key</h3>
-    <input type="password" id="openai-key" placeholder="sk-proj-..." required>
-    
-    <h3>2. Your repositories</h3>
+    <h3>Your repositories</h3>
     <div id="repo-list" class="repo-list">Loading repositories...</div>
 </div>
 
-<div id="chat-section" class="card hidden">
-    <h2>Chat with your Repo</h2>
-    <div id="chat-box"></div>
-    <div style="display:flex;gap:10px;">
-        <input type="text" id="chat-input" placeholder="Ask a question about the codebase...">
-        <button class="primary" onclick="sendMessage()">Send</button>
+<div id="scout-section" class="card hidden">
+    <div class="scout-header">
+        <h2 id="scout-title">Select what to index</h2>
+    </div>
+    
+    <div id="scout-subprojects"></div>
+    <div id="scout-submodules" style="margin-top: 20px;"></div>
+    
+    <div style="display:flex; justify-content:flex-end; gap:12px; margin-top:20px;">
+        <button class="secondary" onclick="cancelScout()">Cancel</button>
+        <button class="primary" id="confirm-scout-btn">Confirm & Index ↗</button>
     </div>
 </div>
 
 <script>
-let currentTaskId = null; 
-
-/* =========================================
-1. AUTHENTICATION & UI SETUP
-========================================= */
-window.onload = async () => {
+window.onload = () => {
     const urlParams = new URLSearchParams(window.location.search);
     const status = urlParams.get('status');
     const error = urlParams.get('error');
+    const notice = urlParams.get('notice'); // <-- NEW
 
-    // 1. Handle user canceling the GitHub flow
-    if (error === 'installation_canceled') {
-        alert("You canceled the GitHub connection. We need access to analyze your repositories!");
+    // 1. Catch Marketplace Installs (User isn't logged in yet)
+    if (notice) {
         window.history.replaceState({}, document.title, window.location.pathname);
-    }
-
-    // 2. The Setup-Redirect Magic (Catching the webhook success)
-    if (status) {
-        // Instantly clean the URL bar so the user doesn't see ?status=installed
-        window.history.replaceState({}, document.title, window.location.pathname);
-        
-        if (status === 'installed' || status === 'updated') {
-            document.getElementById('login-section').classList.add('hidden');
-            document.getElementById('connect-section').classList.add('hidden');
-            document.getElementById('setup-section').classList.remove('hidden');
-            
-            // Start the smart polling while SQS works in the background
-            startSyncPolling();
-            return; // Exit here, let the poller handle the rest
+        if (notice === 'finish_github_install') {
+            alert("GitHub connection successful! Please log in to complete your setup.");
+            document.getElementById('login-section').classList.remove('hidden');
+            // We return early here so it stops and waits for them to log in
+            return; 
         }
     }
 
-    // 3. Normal Page Load (Checking Auth)
+    // 1. Catch Webhook Redirects & Errors
+    if (error) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+        if (error === 'installation_canceled') {
+            alert("You canceled the GitHub connection.");
+        } else if (error === 'csrf_failed') {
+            alert("Security check failed. Please log in and try again.");
+            document.getElementById('login-section').classList.remove('hidden');
+            return;
+        }
+    }
+
+    if (status) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+        if (status === 'installed' || status === 'updated') {
+            document.getElementById('setup-section').classList.remove('hidden');
+            // Trigger fetch immediately, it will handle the polling
+            fetchRepos(); 
+            return;
+        }
+    }
+
+    // 2. Normal Auth Check
     checkAuthAndLoad();
 };
 
@@ -122,400 +126,278 @@ async function checkAuthAndLoad() {
         const res = await fetch('http://127.0.0.1:8000/auth/status', { credentials: 'include' });
         if (res.ok) {
             const data = await res.json();
-            
-            document.getElementById('login-section').classList.add('hidden');
-            document.getElementById('user-name').innerText = data.username;
-            document.getElementById('profile-section').classList.remove('hidden');
-            
             if (data.is_installed) {
                 document.getElementById('setup-section').classList.remove('hidden');
-                document.getElementById('connect-section').classList.add('hidden');
                 fetchRepos(); 
             } else {
                 document.getElementById('connect-section').classList.remove('hidden');
-                document.getElementById('setup-section').classList.add('hidden');
             }
         } else {
-            // Not Logged In
             document.getElementById('login-section').classList.remove('hidden');
-            document.getElementById('profile-section').classList.add('hidden');
-            document.getElementById('connect-section').classList.add('hidden');
-            document.getElementById('setup-section').classList.add('hidden');
-            document.getElementById('chat-section').classList.add('hidden');
         }
-    } catch (e) {
-        document.getElementById('login-section').classList.remove('hidden');
-    }
+    } catch (e) { document.getElementById('login-section').classList.remove('hidden'); }
 }
 
 function waitForInstall() {
-    // Show a quick transition UI, then redirect the CURRENT tab
-    const connectSection = document.getElementById('connect-section');
-    connectSection.innerHTML = `
-        <h2>Redirecting to GitHub...</h2>
-        <p>Taking you to the secure authorization page.</p>
-        <div class="spinner"></div>
-    `;
-    // Notice: No window.open(). We route the current window natively.
     window.location.href = 'http://127.0.0.1:8000/auth/install';
 }
 
-async function frontendLogout(event) {
-    if (event) event.preventDefault(); 
-    try {
-        await fetch('http://127.0.0.1:8000/auth/logout', { method: 'POST', credentials: 'include' });
-        window.location.reload(); 
-    } catch (e) { console.error("Logout failed", e); }
-}
-
-
-async function startSyncPolling() {
-    const repoListDiv = document.getElementById('repo-list');
-    repoListDiv.innerHTML = `
-        <div style="text-align:center; padding: 20px;">
-            <div class="spinner" style="border-top-color: #58a6ff;"></div>
-            <p style="margin-top: 15px; color: #8b949e;">Syncing permissions with GitHub... This usually takes a few seconds.</p>
-        </div>
-    `;
-    
-    let attempts = 0;
-    const maxAttempts = 15; // 30 seconds max wait
-
-    const poll = setInterval(async () => {
-        attempts++;
-        try {
-            const res = await fetch('http://127.0.0.1:8000/api/repos', { credentials: 'include' });
-            if (!res.ok) throw new Error("Fetch failed");
-            
-            const repos = await res.json();
-
-            // If the backend worker has finished saving the new repos to Postgres/Neo4j
-            if (repos && repos.length > 0) {
-                clearInterval(poll);
-                fetchRepos(); // Trigger your main UI draw function
-            } else if (attempts >= maxAttempts) {
-                clearInterval(poll);
-                repoListDiv.innerHTML = "<span style='color:#ff7b72;'>Sync timeout. Please refresh the page manually.</span>";
-            }
-        } catch (err) {
-            console.error("Polling error", err);
-        }
-    }, 2000); 
-}
-
 /* =========================================
-2. REPO DASHBOARD LOGIC
+1. DB-ONLY REPO FETCHING & POLLING
 ========================================= */
+let pollingTimer = null;
+
 async function fetchRepos() {
     try {
-        // 1. Fetch the raw list of repositories
-        const response = await fetch('http://127.0.0.1:8000/api/repos', { 
-            method: 'GET', 
-            credentials: 'include' 
-        });
-
-        if (response.status === 401 || response.status === 403) {
-            document.getElementById('setup-section').classList.add('hidden');
-            document.getElementById('connect-section').classList.remove('hidden');
-            return;
-        }
-
-        let repos = await response.json();
-
-        // 2. THE HYDRATION STEP: Fetch live statuses before drawing the UI!
-        const repoNames = repos.map(r => r.name);
+        const res = await fetch('http://127.0.0.1:8000/api/repos', { credentials: 'include' });
+        if (!res.ok) throw new Error("Fetch failed");
         
-        if (repoNames.length > 0) {
-            try {
-                const statusRes = await fetch('http://127.0.0.1:8000/api/repos/status', {
-                    method: 'POST',
-                    credentials: 'include',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(repoNames)
-                });
-                
-                if (statusRes.ok) {
-                    const liveStatuses = await statusRes.json();
-                    
-                    // 3. Merge the live database status into the frontend repo data
-                    repos = repos.map(repo => {
-                        const liveData = liveStatuses[repo.name];
-                        if (liveData) {
-                            repo.index_status = liveData.status; // e.g., 'ready', 'never_indexed'
-                            repo.action = liveData.action;
-                            repo.commits_since = liveData.commits_since;
-                            repo.last_indexed_at = liveData.last_indexed_at;
-                        }
-                        return repo;
-                    });
-                }
-            } catch (statusErr) {
-                console.error("Failed to fetch live statuses. Falling back to default.", statusErr);
-            }
-        }
-
-        // 4. Draw the UI with the perfect, real-time data
+        const data = await res.json();
+        const repos = data.repos; // FIX: Extract array from backend wrapper
+        
         const repoListDiv = document.getElementById('repo-list');
         repoListDiv.innerHTML = '';
 
+        if (repos.length === 0) {
+            repoListDiv.innerHTML = `
+                <div style="text-align:center; padding: 40px 20px; color: #8b949e; background: #161b22; border-radius: 12px; border: 1px dashed #30363d;">
+                    <div class="spinner" style="border-top-color: #58a6ff; margin-bottom: 15px;"></div>
+                    <p style="margin:0; font-weight: 600; color: white;">Syncing with GitHub</p>
+                    <p style="margin-top: 5px; font-size: 14px;">Importing your repositories securely. This usually takes a few seconds.</p>
+                </div>
+            `;
+            // Keep polling every 3 seconds until the webhook finishes!
+            if (pollingTimer) clearTimeout(pollingTimer);
+            pollingTimer = setTimeout(fetchRepos, 3000);
+            return; // Stop running the rest of the function
+        }
+
+        let isAnythingIndexing = false;
+
         repos.forEach(repo => {
+            const uiStatus = repo.index_status || 'not_indexed'; // FIX: map to index_status column
+            
+            // Check if we need to keep polling
+            if (uiStatus === 'indexing' || uiStatus === 'pending') {
+                isAnythingIndexing = true;
+            }
+            
             const card = document.createElement('div');
             card.className = 'repo-card';
             card.innerHTML = `
                 <div class="repo-left">
-                    <div class="repo-icon">${repo.private ? '🔒' : '🌍'}</div>
+                    <div class="repo-icon">${repo.is_private ? '🔒' : '🌍'}</div>
                     <div class="repo-content">
-                        <div class="repo-name">${repo.name}</div>
-                        <div class="repo-meta">
-                            ${repo.language || 'Unknown'} · ${repo.file_count || 0} files · ${repo.meta_text || ''}
-                        </div>
+                        <div class="repo-name">${repo.full_name}</div>
+                        <div class="repo-meta">ID: ${repo.id} · Updated: ${new Date(repo.updated_at).toLocaleDateString()}</div>
                     </div>
                 </div>
                 <div class="repo-right">
-                    ${buildStatusBadge(repo)}
-                    ${buildActionButton(repo)}
+                    ${buildStatusBadge(repo, uiStatus)}
+                    ${buildActionButton(repo, uiStatus)}
                 </div>
             `;
             repoListDiv.appendChild(card);
-
-            // 5. THE RESUME TRIGGER: If they logged back in while a worker is still running, restart the poller!
-            if (repo.index_status === 'indexing' || repo.index_status === 'pending') {
-                pollRepoStatus(repo.name);
-            }
         });
 
+        // FIX: The Smart Poller - Only poll if something is actually indexing
+        if (pollingTimer) clearTimeout(pollingTimer);
+        if (isAnythingIndexing) {
+            pollingTimer = setTimeout(fetchRepos, 3000); // Check DB every 3 seconds
+        }
+
     } catch (err) {
-        document.getElementById('repo-list').innerHTML = `<div style="color:red; text-align:center;">Failed to load repositories.</div>`;
+        console.error(err);
     }
 }
 
-function buildStatusBadge(repo) {
-    let extraText = '';
-
-    switch(repo.index_status) {
-        case 'ready': 
-            // Add the "3 days ago" text if it exists
-            if (repo.last_indexed_at) {
-                extraText = `<span style="color:#8b949e; font-size:13px; margin-left:14px;">${repo.last_indexed_at}</span>`;
-            }
-            return `<div style="display:flex; align-items:center;"><div class="badge badge-indexed">✓ Indexed</div>${extraText}</div>`;
-            
-        case 'stale': 
-            // Add the "7 new commits" text using the yellow color from your design
-            if (repo.commits_since) {
-                extraText = `<span style="color:#d29922; font-size:13px; margin-left:14px; display:flex; align-items:center; gap:4px;">⎇ ${repo.commits_since} new commits</span>`;
-            }
-            return `<div style="display:flex; align-items:center;"><div class="badge badge-stale">◷ Stale</div>${extraText}</div>`;
-            
-        case 'indexing': 
-        case 'pending':
-            // Group the badge and progress bar together horizontally
-            return `<div style="display:flex; align-items:center; gap:12px;"><div class="badge badge-indexing">Indexing</div><div class="progress"><div class="progress-bar"></div></div></div>`;
-            
-        case 'setup_paused': 
-            return `<div class="badge badge-paused">Setup paused</div>`;
-        case 'failed': 
-            return `<div class="badge badge-failed">⚠ Failed</div>`;
-        case 'never_indexed':
-        default: 
-            return `<div class="badge badge-not-indexed">Not indexed</div>`;
-    }
-}
-
-function buildActionButton(repo) {
-    // 1. THE NEW UX RULE: If it's public, show it but lock it down.
-    if (repo.private === false) {
+function buildStatusBadge(repo, status) {
+    if (status === 'ready') return `<div class="badge badge-indexed">✓ Indexed</div>`;
+    if (status === 'stale') return `<div class="badge badge-stale">◷ Stale</div>`;
+    
+    // FIX: Progress logic safely wrapped inside the builder function
+    if (status === 'indexing' || status === 'pending') {
+        if (repo.files_total > 0) {
+            const percent = Math.round((repo.files_accepted / repo.files_total) * 100);
+            return `
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <div class="badge badge-indexing">Indexing</div>
+                    <div class="progress" title="${repo.files_accepted} / ${repo.files_total} files">
+                        <div class="progress-bar" style="width: ${percent}%;"></div>
+                    </div>
+                    <div class="small-text">${repo.files_accepted} files...</div>
+                </div>
+            `;
+        }
         return `
-            <button class="repo-btn" disabled 
-                style="opacity: 0.5; cursor: not-allowed; background: #2d333b;" 
-                title="Currently, only private repositories are supported for indexing.">
-                🔒 Private Only
-            </button>
+            <div style="display:flex; align-items:center; gap:12px;">
+                <div class="badge badge-indexing">Starting...</div>
+                <div class="spinner" style="width:14px; height:14px; border-width:2px; border-top-color:#58a6ff;"></div>
+            </div>
         `;
     }
 
-    const currentAction = repo.action || 'index';
+    return `<div class="badge badge-not-indexed">Not indexed</div>`;
+}
 
-    switch(currentAction) {
-        case 'view': 
-            // Styled perfectly as a blue text link to match the screenshot
-            return `<a href="#" onclick="viewWiki('${repo.name}'); return false;" style="color:#58a6ff; font-size:14px; font-weight:600; text-decoration:none; display:flex; align-items:center; gap:4px;">
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M10.604 1h4.146a.25.25 0 0 1 .25.25v4.146a.25.25 0 0 1-.427.177L13.03 4.03 9.28 7.78a.75.75 0 0 1-1.06-1.06l3.75-3.75-1.543-1.543A.25.25 0 0 1 10.604 1ZM2.75 4.5a.25.25 0 0 0-.25.25v8.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25v-3.5a.75.75 0 0 1 1.5 0v3.5A1.75 1.75 0 0 1 11.25 15h-8.5A1.75 1.75 0 0 1 1 13.25v-8.5C1 3.567 2.007 2.75 3.25 2.75h3.5a.75.75 0 0 1 0 1.5h-3.5Z"></path></svg> 
-                View wiki
-            </a>`;
-        case 'reindex': 
-            return `<button class="repo-btn" onclick="reIndexRepo('${repo.name}')">Re-index ↗</button>`;
-        case 'resume': 
-            return `<button class="repo-btn" onclick="resumeSetup('${repo.name}')">Resume setup ↗</button>`;
-        case 'retry': 
-            return `<button class="repo-btn" onclick="retryRepo('${repo.name}')">Retry ↗</button>`;
-        case 'none': 
-            return ``; // When indexing, we just show the progress bar, no extra button needed
-        case 'index':
-        default: 
-            return `<button class="repo-btn" onclick="indexRepo('${repo.name}')">Index ↗</button>`;
+function buildActionButton(repo, status) {
+    if (repo.is_private === false) {
+        return `<button class="repo-btn" disabled style="opacity:0.5; cursor:not-allowed;">🔒 Private Only</button>`;
     }
+    if (status === 'ready') {
+        return `<button class="repo-btn">View wiki ↗</button>`;
+    }
+    if (status === 'indexing' || status === 'pending') {
+        return ``; // Hide button while indexing
+    }
+    return `<button class="repo-btn" onclick="initiateIndex(${repo.id}, '${repo.full_name}')">Index ↗</button>`;
 }
 
 /* =========================================
-3. ACTIONS & POLLING
+2. THE SCOUT PIPELINE
 ========================================= */
-/* =========================================
-3. ACTIONS & POLLING
-========================================= */
-async function indexRepo(repoName) {
-    const openaiKey = document.getElementById('openai-key').value.trim();
-    if (!openaiKey) {
-        alert("Please enter your OpenAI API key before indexing.");
-        document.getElementById('openai-key').focus();
-        return;
-    }
-
-    try{
-        await fetch('http://127.0.0.1:8000/api/repos/index', {
-            method:'POST',
-            credentials:'include',
-            headers:{ 'Content-Type':'application/json' },
-            // THE FIX: Send repo_name instead of repo_id
-            body:JSON.stringify({ repo_name: repoName, openai_key: openaiKey })
+async function initiateIndex(repoId, repoName) {
+    try {
+        const res = await fetch(`http://127.0.0.1:8000/api/repos/${repoId}/index`, {
+            method: 'POST',
+            credentials: 'include'
         });
+        const data = await res.json();
         
-        // Trigger the poller with the name!
-        pollRepoStatus(repoName);
-    } catch(err){ console.error(err); }
+        if (data.next === "scout") {
+            loadScoutUI(repoId, repoName);
+        }
+    } catch (err) { alert("Pipeline validation failed."); }
 }
 
-async function retryRepo(repoName) {
-    const openaiKey = document.getElementById('openai-key').value.trim();
-    if (!openaiKey) {
-        alert("Please enter your OpenAI API key before retrying.");
-        document.getElementById('openai-key').focus();
-        return;
+async function loadScoutUI(repoId, repoName) {
+    document.getElementById('setup-section').classList.add('hidden');
+    const scoutSection = document.getElementById('scout-section');
+    scoutSection.classList.remove('hidden');
+    
+    document.getElementById('scout-title').innerText = `Select what to index — ${repoName}`;
+    const projDiv = document.getElementById('scout-subprojects');
+    const modDiv = document.getElementById('scout-submodules');
+    
+    projDiv.innerHTML = `<div class="spinner"></div> Scanning structure...`;
+    modDiv.innerHTML = '';
+
+    try {
+        const res = await fetch(`http://127.0.0.1:8000/api/repos/${repoId}/scout`, { credentials: 'include' });
+        const payload = await res.json();
+        const scout = payload.scout;
+
+        renderScoutItems(scout, repoId);
+    } catch (err) {
+        projDiv.innerHTML = `<span style="color:red">Failed to load scout data.</span>`;
+    }
+}
+
+function renderScoutItems(scout, repoId) {
+    const projDiv = document.getElementById('scout-subprojects');
+    const modDiv = document.getElementById('scout-submodules');
+    
+    if (scout.subprojects && scout.subprojects.length > 0) {
+        let html = `<h3>Monorepo subprojects (${scout.monorepo_tooling || 'Auto'})</h3>`;
+        scout.subprojects.forEach(p => {
+            const checked = p.auto_selected ? "checked" : "";
+            html += `
+            <div class="scout-item">
+                <div class="scout-item-left">
+                    <input type="checkbox" class="scout-chk-proj" value="${p.path}" ${checked}>
+                    <div>
+                        <span class="scout-item-title">${p.name}</span>
+                        <span class="scout-item-meta">${p.source_file_count} files · ${p.dependent_count} dependents</span>
+                    </div>
+                </div>
+                <div class="score-badge">${p.score.toFixed(2)}</div>
+            </div>`;
+        });
+        projDiv.innerHTML = html;
+    } else {
+        projDiv.innerHTML = '';
     }
 
-    try{
-        await fetch('http://127.0.0.1:8000/repos/index', {
-            method:'POST',
-            credentials:'include',
-            headers:{ 'Content-Type':'application/json' },
-            body:JSON.stringify({ repo_name: repoName, force_refresh: true, openai_key: openaiKey })
+    if (scout.submodules && scout.submodules.length > 0) {
+        let html = `<h3>Submodules</h3>`;
+        scout.submodules.forEach(m => {
+            const checked = m.auto_selected ? "checked" : "";
+            if (m.action_required) {
+                html += `
+                <div class="scout-item">
+                    <div class="scout-item-left">
+                        <span style="color:#ff7b72;">◻</span>
+                        <div>
+                            <span class="scout-item-title">${m.name}</span>
+                            <span class="scout-item-meta">App not installed</span>
+                        </div>
+                    </div>
+                    <button class="repo-btn" onclick="window.open('${m.action_url}', '_blank')">Grant Access ↗</button>
+                </div>`;
+            } else if (m.user_can_toggle) {
+                html += `
+                <div class="scout-item">
+                    <div class="scout-item-left">
+                        <input type="checkbox" class="scout-chk-mod" value="${m.path}" ${checked}>
+                        <div>
+                            <span class="scout-item-title">${m.name}</span>
+                            <span class="scout-item-meta">${m.is_private ? 'private' : 'public'}</span>
+                        </div>
+                    </div>
+                    <div class="badge badge-indexed">Ready</div>
+                </div>`;
+            }
         });
-        pollRepoStatus(repoName);
-    } catch(err){ console.error(err); }
+        modDiv.innerHTML = html;
+    }
+
+    document.getElementById('confirm-scout-btn').onclick = () => submitSelection(repoId);
 }
 
-async function reIndexRepo(repoName){
-    try{
-        // Notice the URL changed to use the string name!
-        await fetch(`http://127.0.0.1:8000/repos/${repoName}/select/confirm`, { method:'POST', credentials:'include' });
-        pollRepoStatus(repoName);
-    }catch(err){}
-}
-
-async function resumeSetup(repoName){
-    try{ 
-        await fetch(`http://127.0.0.1:8000/repos/${repoName}/scout`, { method:'GET', credentials:'include' }); 
-    }catch(err){}
-}
-
-function viewWiki(repoName){ 
-    window.location.href = `/wiki/${repoName}`; 
-}
-
-function pollRepoStatus(repoName) {
-    if (!repoName || repoName === 'undefined') return;
-    // If this repo is already being polled, don't start a second one!
-    if (activePollers[repoName]) return;
-    // Save the interval to the dictionary
-    activePollers[repoName] = setInterval(async () => {
-        try {
-            // THE FIX: Swapped to a POST request expecting an array of names
-            const response = await fetch(`http://127.0.0.1:8000/api/repos/status`, { 
-                method: 'POST',
-                credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify([repoName])
-            });
-            
-            if (!response.ok) { 
-                clearInterval(interval); 
-                return; 
-            }
-            
-            const data = await response.json();
-            const repoData = data[repoName];
-            
-            if (!repoData) return; // Safeguard if backend returns empty
-
-            const currentStatus = repoData.status;
-
-            // Stop polling if the task hits a final state
-            if (
-                currentStatus === 'ready' || 
-                currentStatus === 'failed' || 
-                currentStatus === 'stale' ||
-                currentStatus === 'setup_paused' ||
-                currentStatus === 'never_indexed'
-            ) {
-                // THE FIX: Clean up the dictionary when finished
-                clearInterval(activePollers[repoName]);
-                delete activePollers[repoName];
-                fetchRepos(); // Redraw the UI!
-            }
-        } catch (err) { clearInterval(interval); }
-    }, 5000);
+function cancelScout() {
+    document.getElementById('scout-section').classList.add('hidden');
+    document.getElementById('setup-section').classList.remove('hidden');
 }
 
 /* =========================================
-4. CHAT FUNCTIONS
+3. SUBMIT SELECTION TO JOBS TABLE
 ========================================= */
-async function sendMessage(){
-    const input = document.getElementById('chat-input');
-    const message = input.value.trim();
-    if(!message) return;
+async function submitSelection(repoId) {
+    const projBoxes = document.querySelectorAll('.scout-chk-proj:checked');
+    const modBoxes = document.querySelectorAll('.scout-chk-mod:checked');
+    
+    const selected_subprojects = Array.from(projBoxes).map(b => b.value);
+    const selected_submodules = Array.from(modBoxes).map(b => b.value);
 
-    appendMessage("You", message, "user-msg");
-    input.value='';
-    const aiMsgDiv = appendMessage("AI", "", "ai-msg");
+    const payload = {
+        selection_id: Date.now(), 
+        repo_id: repoId,
+        message: "User confirmed via UI",
+        selected_subprojects: selected_subprojects,
+        selected_submodules: selected_submodules,
+        start_immediately: true
+    };
 
-    try{
-        const res = await fetch('/api/chat', {
-            method:'POST',
-            headers:{ 'Content-Type':'application/json' },
-            body:JSON.stringify({ task_id:currentTaskId, message:message })
+    try {
+        document.getElementById('confirm-scout-btn').innerHTML = `<div class="spinner"></div> Starting...`;
+        
+        await fetch(`http://127.0.0.1:8000/api/repos/${repoId}/select`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
         });
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        while(true){
-            const {done,value} = await reader.read();
-            if(done) break;
-            const chunk = decoder.decode(value);
-            const lines = chunk.split('\n');
-            for(let line of lines){
-                if(line.startsWith('data: ')){
-                    aiMsgDiv.innerHTML += line.replace('data: ','');
-                    scrollToBottom();
-                }
-            }
-        }
-    }catch(err){
-        aiMsgDiv.innerHTML += `<br><span style='color:red;'>Connection lost.</span>`;
+
+        cancelScout();
+        document.getElementById('confirm-scout-btn').innerText = "Confirm & Index ↗";
+        
+        // This will instantly start drawing the progress bar and polling
+        fetchRepos();
+
+    } catch (err) {
+        alert("Failed to start indexing job.");
+        document.getElementById('confirm-scout-btn').innerText = "Confirm & Index ↗";
     }
-}
-
-function appendMessage(sender,text,className){
-    const box = document.getElementById('chat-box');
-    const msgDiv = document.createElement('div');
-    msgDiv.className = `msg ${className}`;
-    msgDiv.innerHTML = `<strong>${sender}:</strong> <span>${text}</span>`;
-    box.appendChild(msgDiv);
-    scrollToBottom();
-    return msgDiv.querySelector('span');
-}
-
-function scrollToBottom(){
-    const box = document.getElementById('chat-box');
-    box.scrollTop = box.scrollHeight;
 }
 </script>
 </body>
