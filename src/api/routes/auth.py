@@ -1,19 +1,16 @@
-from src.database.mock_db import MOCK_DB
 from fastapi import APIRouter, Request, HTTPException ,Depends , Query
 from fastapi.responses import RedirectResponse,JSONResponse
-from authlib.integrations.starlette_client import OAuth
 from src.core.config import get_settings 
 from src.core.logger import get_logger
-from src.core.crypto import encrypt_token, decrypt_token
+from src.core.crypto import encrypt_token
+from src.core.exceptions import DatabaseOperationError
 from src.utils.auth_helpers import _parse_token_expiry
 from src.utils.services_helpers import get_auth_session , AuthSession
-from src.services.github import GitHubService
 from src.services.github_oauth import oauth
 from src.crud.user import _upsert_user
 from src.crud.installation import _recover_installations ,_save_installation
-from src.core.database import get_authed_read_db_dep
+from src.core.database import get_read_db_dep
 from uuid import UUID
-
 import asyncio
 import secrets
 
@@ -54,29 +51,33 @@ async def auth_github_callback(request: Request):
     
     try:
         token_data = await oauth.github.authorize_access_token(request)
+        oauth_token   = token_data.get("access_token")
+        refresh_token = token_data.get("refresh_token")
+
+        if not oauth_token:
+            raise ValueError("No access token returned from GitHub")
+
     except Exception as e:
         logger.error("Token exchange failed: %s", e)
         return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=token_failed")
  
-    oauth_token   = token_data.get("access_token")
-    refresh_token = token_data.get("refresh_token")
+    try:
+        tasks = [
+            oauth.github.get('user', token=token_data),
+            oauth.github.get('user/emails', token=token_data),
+            oauth.github.get('user/installations', token=token_data)
+        ]
 
-    if not oauth_token:
-        return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=no_token")
+        response = await asyncio.gather(*tasks,return_exceptions=True)
+        user_resp, email_resp,installations_resp = response
 
+        if isinstance(user_resp,Exception)or user_resp.status_code != 200:
+            logger.error("Failed to fetch core GitHub profile data: %s", user_resp)
+            return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=profile_failed")
     
-    tasks = [
-        oauth.github.get('user', token=token_data),
-        oauth.github.get('user/emails', token=token_data),
-        oauth.github.get('user/installations', token=token_data)
-    ]
-
-    response = await asyncio.gather(*tasks,return_exceptions=True)
-    user_resp, email_resp,installations_resp = response
-
-    if isinstance(user_resp,Exception)or user_resp.status_code != 200:
-        logger.error("Failed to fetch core GitHub profile data: %s", user_resp)
-        return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=profile_failed")
+    except Exception as e:
+        logger.error("Network failure during parallel GitHub API fetch: %s", e)
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}?error=network_timeout")
    
     github_user = user_resp.json()
 
@@ -99,30 +100,46 @@ async def auth_github_callback(request: Request):
     if not isinstance(installations_resp, Exception) and installations_resp.status_code == 200:
         existing_installs = installations_resp.json().get("installations", [])
 
+    token_expires = _parse_token_expiry(token_data)
     # encrypting token 
-    oauth_token_enc   = await encrypt_token(oauth_token)
-    refresh_token_enc = await encrypt_token(refresh_token) if refresh_token else None
-    token_expires     = _parse_token_expiry(token_data)
-
-    #db save
-    user_id, account_id, is_new = await _upsert_user(
-        github_user=github_user,
-        primary_email=primary_email,
-        oauth_token_enc=oauth_token_enc,
-        refresh_token_enc=refresh_token_enc,
-        token_expires=token_expires,
-    )
+    try:
+        oauth_token_enc   = await encrypt_token(oauth_token)
+        refresh_token_enc = await encrypt_token(refresh_token) if refresh_token else None
     
-     # ── Recover any existing GitHub App installations ─────────────────────────
-    if existing_installs:
-        await _recover_installations(
-            account_id=account_id,
-            installs=existing_installs,
+        #db save
+        user_id, account_id, is_new = await _upsert_user(
+            github_user=github_user,
+            primary_email=primary_email,
+            oauth_token_enc=oauth_token_enc,
+            refresh_token_enc=refresh_token_enc,
+            token_expires=token_expires,
         )
+        
+        # ── Recover any existing GitHub App installations ─────────────────────────
+        if existing_installs:
+            await _recover_installations(
+                account_id=account_id,
+                installs=existing_installs,
+            )
+    except (RuntimeError, ValueError) as e:
+        logger.critical("KMS/Encryption failure during auth for user %s: %s", github_user.get("login"), e)
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}/login?error=auth_system_error")
+        
+    except DatabaseOperationError as e:
+        # Caught a DB integrity/connection failure
+        logger.error("Database provisioning failed for user %s: %s", github_user.get("login"), e)
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}/login?error=database_error")
+        
+    except Exception as e:
+        # Ultimate catch-all for unknown edge cases
+        logger.critical("Fatal OAuth pipeline failure for user %s: %s", github_user.get("login"), e, exc_info=True)
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}/login?error=system_failure")
     
-    request.session["user_id"] = user_id
-    request.session["account_id"] = account_id
-    request.session["is_new"] = is_new
+    request.session.update({
+        "user_id": str(user_id),
+        "account_id": str(account_id),
+        "is_new": is_new
+    })
 
     redirect_url = (
         f"{settings.FRONTEND_URL}?status=new_user"
@@ -135,7 +152,7 @@ async def auth_github_callback(request: Request):
 @router.get("/status")
 async def get_auth_status(
     session: AuthSession = Depends(get_auth_session),
-    conn = Depends(get_authed_read_db_dep)
+    conn = Depends(get_read_db_dep)
 ):
     """
     Fast session check. Called by frontend to know:
@@ -147,45 +164,20 @@ async def get_auth_status(
     Then does ONE DB query for display info (username, plan, install status).
     """
 
- 
-    # One DB query with join — gets everything needed for the status response
-    async with get_authed_read_db_dep() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT
-                u.id,
-                u.github_login,
-                u.github_avatar_url,
-                a.plan,
-                a.payment_status,
-                a.queries_this_month,
-                a.max_queries_month,
-                EXISTS(
-                    SELECT 1 FROM installations i
-                    WHERE i.account_id = a.id
-                      AND i.is_active = TRUE
-                ) AS is_installed
-            FROM users u
-            JOIN accounts a ON a.id = u.account_id
-            WHERE u.id = $1
-              AND u.account_id = $2
-            """,
-            session.user_id, session.account_id,
-        )
- 
+    query ="SELECT * FROM get_auth_status($1::uuid ,$2::uuid)"
+
+    row = await conn.fetchrow(query, str(session.account_id), str(session.user_id))
+   
     if not row:
         raise HTTPException(status_code=401, detail="Session expired")
- 
+    
     return {
         "authenticated":     True,
         "user_id":           str(row["id"]),
         "username":          row["github_login"],
-        "avatar_url":        row["github_avatar_url"],
+        "avatar_url":        row["avatar_url"],
         "plan":              row["plan"],
-        "is_installed":      row["is_installed"],
-        "queries_remaining": max(
-            0, row["max_queries_month"] - row["queries_this_month"]
-        ),
+        "is_installed":      row["is_installed"]
     }
 
 @router.get("/install")
