@@ -82,50 +82,63 @@ window.onload = () => {
     const urlParams = new URLSearchParams(window.location.search);
     const status = urlParams.get('status');
     const error = urlParams.get('error');
-    const notice = urlParams.get('notice'); // <-- NEW
+    const notice = urlParams.get('notice'); 
 
-    // 1. Catch Marketplace Installs (User isn't logged in yet)
+    // 1. Catch Marketplace Installs
     if (notice) {
         window.history.replaceState({}, document.title, window.location.pathname);
         if (notice === 'finish_github_install') {
             alert("GitHub connection successful! Please log in to complete your setup.");
             document.getElementById('login-section').classList.remove('hidden');
-            // We return early here so it stops and waits for them to log in
             return; 
         }
     }
 
-    // 1. Catch Webhook Redirects & Errors
+    // 2. Catch Errors (Including the new OAuth callback errors)
     if (error) {
         window.history.replaceState({}, document.title, window.location.pathname);
         if (error === 'installation_canceled') {
             alert("You canceled the GitHub connection.");
         } else if (error === 'csrf_failed') {
             alert("Security check failed. Please log in and try again.");
-            document.getElementById('login-section').classList.remove('hidden');
-            return;
+        } else {
+            // Catch-all for access_denied, token_failed, profile_failed, etc.
+            alert("Authentication failed: " + error.replace(/_/g, ' '));
         }
+        document.getElementById('login-section').classList.remove('hidden');
+        return;
     }
 
+    // 3. Catch Statuses (Including new_user and returning)
     if (status) {
         window.history.replaceState({}, document.title, window.location.pathname);
         if (status === 'installed' || status === 'updated') {
             document.getElementById('setup-section').classList.remove('hidden');
-            // Trigger fetch immediately, it will handle the polling
             fetchRepos(); 
             return;
         }
+        // If status is 'new_user' or 'returning', we just cleaned the URL bar.
+        // We let the code fall through to checkAuthAndLoad() below!
     }
 
-    // 2. Normal Auth Check
+    // 4. Normal Auth Check
     checkAuthAndLoad();
 };
+
+function waitForInstall() {
+    // This redirects the current window to your FastAPI backend
+    window.location.href = 'http://127.0.0.1:8000/auth/install';
+}
 
 async function checkAuthAndLoad() {
     try {
         const res = await fetch('http://127.0.0.1:8000/auth/status', { credentials: 'include' });
         if (res.ok) {
             const data = await res.json();
+            
+            // Render the User Profile at the top of the screen
+            renderProfile(data);
+
             if (data.is_installed) {
                 document.getElementById('setup-section').classList.remove('hidden');
                 fetchRepos(); 
@@ -138,8 +151,28 @@ async function checkAuthAndLoad() {
     } catch (e) { document.getElementById('login-section').classList.remove('hidden'); }
 }
 
-function waitForInstall() {
-    window.location.href = 'http://127.0.0.1:8000/auth/install';
+// Helper to draw the user profile dynamically
+function renderProfile(data) {
+    // Check if the profile section exists, if not, create it
+    let profileDiv = document.getElementById('user-profile-header');
+    if (!profileDiv) {
+        profileDiv = document.createElement('div');
+        profileDiv.id = 'user-profile-header';
+        profileDiv.style = "display:flex; justify-content:space-between; align-items:center; margin-bottom: 20px;";
+        // Insert it right below the main <h1>
+        document.querySelector('h1').insertAdjacentElement('afterend', profileDiv);
+    }
+    
+    profileDiv.innerHTML = `
+        <div style="display:flex; align-items:center; gap:12px;">
+            <img src="${data.avatar_url}" style="width:40px; height:40px; border-radius:50%; border:1px solid #30363d;" alt="Avatar">
+            <div>
+                <div style="font-weight:bold; font-size:16px;">${data.username}</div>
+                <div style="color:#8b949e; font-size:12px;">Plan: ${data.plan}</div>
+            </div>
+        </div>
+        <a href="http://127.0.0.1:8000/auth/logout" style="color:#ff7b72; text-decoration:none; font-weight:600; font-size:14px;">Logout ↗</a>
+    `;
 }
 
 /* =========================================
