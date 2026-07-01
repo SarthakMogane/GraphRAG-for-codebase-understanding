@@ -149,6 +149,7 @@ async def auth_github_callback(request: Request):
 
     return RedirectResponse(url=redirect_url , status_code=302)
 
+
 @router.get("/status")
 async def get_auth_status(
     session: AuthSession = Depends(get_auth_session),
