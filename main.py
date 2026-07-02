@@ -14,7 +14,7 @@ from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field
-from sse_starlette.sse import EventSourceResponse
+# from sse_starlette.sse import EventSourceResponse
 from src.core.logger import get_logger
 import uvicorn
 import uuid
@@ -130,14 +130,29 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from src.services.github import GitHubService
 from src.core.database import create_pools , close_pools
+from botocore.config import Config
+
+
+logger = get_logger(__name__)
+
+settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await create_pools()
-    app.state.aws_session = aioboto3.Session()
-    client_ctx = app.state.aws_session.client("sqs", region_name=settings.AWS_REGION)
-    app.state.sqs_client = await client_ctx.__aenter__()
-    
+
+    boto_config = Config(
+        max_pool_connections=5, # Limits how many active connections stay open globally
+        retries={'max_attempts': 3}
+    )
+    app.state.aws_session = aioboto3.Session(aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=settings.AWS_REGION)
+    print(f"Loaded Settings Region: {settings.AWS_REGION}")
+    print(f"Loaded Settings Region: {settings.SQS_WEBHOOK_QUEUE_URL}")
+    # Store the config on the app state or use a factory pattern
+    app.state.boto_config = boto_config
+
     app.state.github_service = GitHubService()
 
     yield
@@ -146,7 +161,7 @@ async def lifespan(app: FastAPI):
     # Teardown
     await app.state.github_service.close()
  # ── Shutdown: Cleanly close the connection pool ──
-    await client_ctx.__aexit__(None, None, None)
+    
     
 
 
@@ -160,9 +175,7 @@ from src.core.config import get_settings
 from src.api.routes import repos
 
 
-logger = get_logger(__name__)
 
-settings = get_settings()
 # Initialize FastAPI
 app = FastAPI(
     title=settings.PROJECT_NAME,
