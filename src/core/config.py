@@ -36,7 +36,8 @@ class Settings(BaseSettings):
         # ── GitHub ────────────────────────────────────────────────────────
     # Service account GitHub App credentials for high-rate-limit API access
     GITHUB_APP_ID: int
-    GITHUB_APP_PRIVATE_KEY: str          # PEM key as string (newlines as \n)
+    GITHUB_APP_PRIVATE_KEY: str 
+    GITHUB_APP_SLUG:str         # PEM key as string (newlines as \n)
     # GITHUB_APP_INSTALLATION_ID: int
     GITHUB_WEBHOOK_SECRET: str           # For validating incoming webhook payloads
 
@@ -58,7 +59,9 @@ class Settings(BaseSettings):
     # crypto 
     LOCAL_ENCRYPTION_KEY:str
     KMS_KEY_ARN_TOKENS: str
-    AWS_REGION:str
+    AWS_ACCESS_KEY_ID:str
+    AWS_SECRET_ACCESS_KEY:str
+    AWS_REGION:str= "eu-north-1" 
     APP_ENV:str
 
     #sqs
