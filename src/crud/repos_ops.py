@@ -1,5 +1,6 @@
 from uuid import UUID
-from fastapi import HTTPException
+from fastapi import HTTPException 
+from typing import Optional
 from src.core.logger import get_logger
 import asyncpg
 from src.services.pre_clone.types import ValidationVerdict, RoutingDecision, ValidationResult
@@ -18,7 +19,7 @@ async def _upsert_repos_in_conn(
     conn,
     repos: list[dict],
     installation_db_id: str,
-    account_id: str,
+    account_id:Optional[str],
 ) -> None:
     """
     INSERT repos from a GitHub payload list. Called inside an existing
@@ -27,6 +28,8 @@ async def _upsert_repos_in_conn(
     Stores BOTH public and private repos to support UI visibility and 
     future repository visibility toggles.
     """
+    db_account_id = str(UUID(account_id)) if account_id else None
+
     for repo in repos:
         full_name = repo.get("full_name", "")
         if "/" not in full_name:
@@ -60,7 +63,7 @@ async def _upsert_repos_in_conn(
                 -- Deliberately NOT updating index_status
                 -- so existing indexed repos keep their READY/STALE status
             """,
-            account_id,
+            db_account_id,
             installation_db_id,
             repo.get("id"),
             full_name,
@@ -74,7 +77,7 @@ async def _remove_repos_in_conn(
     conn,  # The live connection passed from the parent's get_transaction()
     repos: list[dict],
     installation_db_id: str,
-    account_id: str
+    account_id: Optional[str]
 ) -> None:
     """
     Marks removed repositories as 'inaccessible' instead of hard-deleting them.
@@ -92,6 +95,7 @@ async def _remove_repos_in_conn(
     if not repo_ids_to_remove:
         return
 
+    db_account_id = str(UUID(account_id)) if account_id else None
     # Use ANY() to bulk update every repo in that list in one shot
     await conn.execute(
         """
@@ -100,11 +104,11 @@ async def _remove_repos_in_conn(
             index_status = 'inaccessible',
             updated_at = NOW()
         WHERE
-            account_id = $1
+            ($1::uuid IS NULL OR account_id = $1::uuid)
             AND installation_id = $2
             AND github_repo_id = ANY($3::bigint[])
         """,
-        account_id,
+        db_account_id,
         installation_db_id,
         repo_ids_to_remove
     )

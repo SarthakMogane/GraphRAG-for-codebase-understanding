@@ -108,8 +108,13 @@ async def _handle_installation_repos(
     # ── PHASE 2: SYNC REPOSITORIES (Secure User Context) ──────────────────────
     if repos_added or repos_removed:
         try:
+            if account_uuid is None:
+                logger.info("Syncing repos using system context for unlinked installation_id %d", github_install_id)
+                context_manager = get_system_transaction()
+            else:
+                context_manager = get_transaction(account_id=account_uuid)
             # We now know who the user is! Switch to the strict RLS transaction.
-            async with get_transaction(account_id=account_uuid) as conn:
+            async with context_manager as conn:
                 
                 # 1. Handle Added Repos
                 if repos_added:
@@ -117,7 +122,7 @@ async def _handle_installation_repos(
                         conn=conn,
                         repos=repos_added,
                         installation_db_id=install_db_id,
-                        account_id=str(account_uuid)
+                        account_id=str(account_uuid) if account_uuid else None
                     )
 
                 # 2. Handle Removed Repos
@@ -126,7 +131,7 @@ async def _handle_installation_repos(
                         conn=conn,
                         repos=repos_removed,
                         installation_db_id=install_db_id,
-                        account_id=str(account_uuid)
+                        account_id=str(account_uuid) if account_uuid else None
                     )
                     
         except asyncpg.PostgresError as e:
