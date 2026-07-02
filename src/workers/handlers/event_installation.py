@@ -43,7 +43,7 @@ async def _handle_installation(payload: dict, delivery_id: str) -> None:
             owner_login=owner_login,
             owner_type=owner_type,
             owner_github_id=owner_github_id,
-            sender_github_id=sender_github_id,
+            # sender_github_id=sender_github_id,
         )
  
     elif action == "deleted":
@@ -66,7 +66,8 @@ async def _handle_installation(payload: dict, delivery_id: str) -> None:
 
 
 async def _handle_installation_repos(
-    payload: dict
+    payload: dict,
+    delivery_id:str
 ) -> None:
     """
     Handles 'installation_repositories' events (added or removed).
@@ -132,8 +133,8 @@ async def _handle_installation_repos(
             raise TransientWebhookError(f"DB failed syncing repositories: {e}")
 
     logger.info(
-        "Successfully synced repos for install_id %d. action:%s , Added: %d, Removed: %d",
-        github_install_id,action, len(repos_added), len(repos_removed)
+        "Successfully synced repos for delivery:%s, install_id %d. action:%s , Added: %d, Removed: %d",
+        delivery_id,github_install_id,action, len(repos_added), len(repos_removed)
     )
 
 #helpers ------
@@ -175,7 +176,7 @@ async def _handle_installation_created(
                     owner_type = EXCLUDED.owner_type,
                     owner_github_id = EXCLUDED.owner_github_id,
                     is_active = TRUE,
-                    updated_at = NOW()
+                    installed_at = NOW()
                 RETURNING id, account_id;
                 """,
                 github_install_id,
@@ -213,7 +214,7 @@ async def _handle_installation_created(
                         repo_name = EXCLUDED.repo_name,
                         private = EXCLUDED.private,
                         index_status = 'not_indexed',
-                        updated_at = NOW();
+                        created_at = NOW();
                     """,
                     account_uuid,         # Safe to pass None
                     internal_install_id,  # Guaranteed to exist from Step 1
