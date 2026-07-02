@@ -210,7 +210,6 @@ async def github_app_setup_redirect(
     if setup_action == "install":
         session_state = request.session.pop("github_install_state", None)
         account_id_raw= request.session.get("account_id")
-        account_uuid = UUID(account_id_raw)
 
         # CSRF & MARKETPLACE LOGIC
         if state:
@@ -224,6 +223,8 @@ async def github_app_setup_redirect(
             # They installed from Marketplace but aren't logged into our app.
             return RedirectResponse(url=f"{settings.FRONTEND_URL}/login?notice=finish_github_install")
         
+        account_uuid = UUID(account_id_raw)
+
         try:
             account_uuid = UUID(account_id_raw)
         
