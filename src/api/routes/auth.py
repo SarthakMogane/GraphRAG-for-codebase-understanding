@@ -242,6 +242,13 @@ async def github_app_setup_redirect(
     
     # 2. Permissions Update (Triggered from GitHub Settings)
     elif setup_action == "update":
+        account_id_raw = request.session.get("account_id")
+    
+    # If the user is logged out during a configuration update
+        if not account_id_raw:
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/login?notice=reauthenticate"
+            )
         return RedirectResponse(url=f"{settings.FRONTEND_URL}?status=updated")
 
     # 3. Fallback for anomalous requests
