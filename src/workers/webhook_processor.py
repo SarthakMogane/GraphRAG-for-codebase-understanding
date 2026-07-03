@@ -1,7 +1,7 @@
 
 from src.crud.webhook_ops import _mark_processed
 from src.core.logger import get_logger
-from src.core.database import get_db_dep
+from src.core.database import get_db
 from src.core.exceptions import TransientWebhookError
 from src.workers.handlers.event_installation import _handle_installation ,_handle_installation_repos
 from src.workers.handlers.event_repo_metadata import _handle_repository_metadata
@@ -26,7 +26,7 @@ async def process_webhook_event(
     try:
         # Second idempotency check inside the worker
         # (in case two workers raced on the same SQS message)
-        async with get_db_dep() as conn:
+        async with get_db(readonly=True , use_transaction=False) as conn:
             already_done = await conn.fetchval(
                 "SELECT processed FROM webhooks_received WHERE delivery_id = $1",
                 delivery_id,
@@ -46,7 +46,7 @@ async def process_webhook_event(
         }.get(event_type)
  
         if handler:
-            await handler(payload)
+            await handler(payload,delivery_id)
             await _mark_processed(delivery_id,processed=True,event_type=event_type , payload=payload)
         else:
             logger.debug("Unhandled webhook event type: %s", event_type)
@@ -57,8 +57,13 @@ async def process_webhook_event(
             "Transient error for delivery=%s. Returning to SQS queue. Reason: %s", 
             delivery_id, e
         )
+        try:
         # We save the error so we can see it in the DB, but leave processed=FALSE
-        await _mark_processed(delivery_id, processed=False, error=str(e),event_type=event_type , payload = payload)
+            await _mark_processed(delivery_id, processed=False, error=str(e),event_type=event_type , payload = payload)
+        
+        except Exception as database_failure:
+            #save from entier worker down due to db crash . 
+            logger.critical("Failed to save transient error state to DB", error=str(database_failure))
         # BUBBLE UP: This tells the SQS consumer script NOT to delete the message
         raise e
  
