@@ -13,9 +13,10 @@ from src.services.pre_clone.types import ValidationVerdict,RoutingDecision
 from src.utils.services_helpers import get_github_service
 from src.services.scout.check_structural_changes import _handle_refresh
 from src.utils.services_helpers import get_github_service , get_current_account_id
-from src.core.database import get_transaction ,get_rls_tx_conn ,get_authed_read_db_dep
+from src.core.database import get_transaction ,get_db,get_rls_tx_conn , get_authed_read_db_dep
 from src.core.config import get_settings
 from src.core.logger import get_logger
+from src.core.crypto import decrypt_token
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -26,18 +27,79 @@ router = APIRouter(prefix="/api", tags=["Repositories"])
 @router.get("/repos")
 async def get_user_repos(
     account_id :UUID = Depends(get_current_account_id),
-    conn = Depends(get_authed_read_db_dep)
+    read_conn = Depends(get_authed_read_db_dep),
+    write_conn = Depends(get_rls_tx_conn),
+    github_client = Depends(get_github_service)
 ):
     """
     Purely observes the database state. Does NOT contact GitHub.
     """
     
-    async with get_authed_read_db_dep(account_id=account_id) as conn:
-        repos = await conn.fetch(
-            "SELECT * FROM repos WHERE account_id = $1 ORDER BY updated_at DESC", 
+    async with read_conn(account_id=account_id, readonly=True,use_transaction=False) as conn:
+        db_repos = await conn.fetch(
+            "SELECT * FROM repos WHERE account_id = $1 AND index_status != 'inaccessible' ORDER BY updated_at DESC", 
             account_id
         )
-        return repos
+
+        auth_row = await conn.fetchrow(
+            """
+            SELECT  i.github_install_id,
+                    i.is_active,
+                    u.oauth_token_enc 
+            FROM installations i
+            LEFT JOIN users u ON u.account_id = i.account_id
+            WHERE i.account_id = $1
+            """,
+            account_id
+        )
+
+        db_repo_ids = {row["github_repo_id"] for row in db_repos}
+
+    if not auth_row or not auth_row["github_install_id"]:
+        raise HTTPException(status_code=400, detail="GitHub installation not found for this account.")
+
+    if not auth_row["is_active"]:
+        raise HTTPException(
+            status_code=403, 
+            detail="Your GitHub App installation is suspended or inactive. Please check your GitHub settings."
+        )
+    
+    installation_id = auth_row["github_install_id"]
+
+    decrypted_oauth_token = None
+    encrypted_blob: bytes = auth_row["oauth_token_enc"]  # BYTEA comes out as Python bytes
+
+    if encrypted_blob:
+        try:
+            decrypted_oauth_token = decrypt_token(encrypted_blob)
+        except Exception as e:
+            logger.error(f"KMS decryption failure for user {account_id}: {e}")
+
+    try:
+        live_repos = await github_client.get_installed_repositories(installation_id = installation_id,user_oauth_token = decrypted_oauth_token)
+        live_repo_ids = {repo["id"] for repo in live_repos}
+    
+    except Exception as e:
+        logger.error(f"Upstream live sync failed. Falling back to cached DB state: {e}")
+        return {"repositories": db_repos}
+
+    # Identify entries that are active in DB but missing on GitHub
+    stale_repo_ids = db_repo_ids - live_repo_ids
+    
+    if stale_repo_ids:
+        logger.warning(f"Reconciliation triggered: Moving {len(stale_repo_ids)} missing repos to inaccessible.")
+        async with write_conn(account_id=account_id) as conn:
+            await conn.execute(
+                """
+                UPDATE repos 
+                SET index_status = 'inaccessible', updated_at = NOW()
+                WHERE account_id = $1 AND github_repo_id = ANY($2::bigint[])
+                """,
+                UUID(account_id),
+                list(stale_repo_ids)
+            )
+        return {"repositories": live_repos}
+        
 
 # # Note: Changed from {full_name} to {owner}/{repo} so FastAPI parses it automatically for us!
 # @router.get("/repos/{owner}/{repo}/branches", response_model=List[str])
