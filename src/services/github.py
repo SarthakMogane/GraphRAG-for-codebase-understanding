@@ -224,7 +224,7 @@ class GitHubService:
     async def close(self):
         await self.client.aclose()
 
-    async def _get_as_app(self, path: str, installation_id: int, params: dict = None) -> dict:
+    async def _get_as_app(self, path: str, installation_id: int, params: dict = None, return_header:bool = False) -> dict|tuple[dict, dict]:
         """Authenticated GET using the App Installation Token (Server-to-Server)."""
         token = await self.auth.get_installation_token(installation_id)
         headers = {
@@ -232,16 +232,18 @@ class GitHubService:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        return await self._execute_request(path, headers, params)
+        data,response_header = await self._execute_request(path, headers, params)
+        return (data,response_header) if return_header else data
 
-    async def _get_as_user(self, path: str, user_oauth_token: str ,params: dict = None) -> dict:
+    async def _get_as_user(self, path: str, user_oauth_token: str ,params: dict = None,return_header:bool = False) -> dict:
         """Authenticated GET using the User's OAuth Token (User-to-Server)."""
         headers = {
             "Authorization": f"Bearer {user_oauth_token}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        return await self._execute_request(path, headers, params)
+        data,response_header =  await self._execute_request(path, headers, params)
+        return (data,response_header) if return_header else data 
 
 # update : httpx timeouts configured globally or not.
     async def _execute_request(self, path: str, headers: dict, params: dict = None) -> dict:
@@ -256,7 +258,7 @@ class GitHubService:
             raise RateLimitError(f"Rate limit buffer reached. {remaining} calls remaining.")
 
         resp.raise_for_status()
-        return resp.json()
+        return resp.json() ,dict(resp.headers)
 
     # ── Rate limit  ──────────────────────────────────────────
     async def fetch_rate_limit(self, installation_id) -> dict:
@@ -274,19 +276,41 @@ class GitHubService:
             raise
 
 # ── User API Calls (OAuth Token) ──────────────────────────────────────────
-
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
-    async def get_installed_repositories(self, user_oauth_token: str, installation_id: int) -> list:
+    async def get_installed_repositories(self, installation_id: int, user_oauth_token: str = None) -> list:
         """
-        Fetches ONLY the repositories the user explicitly granted access to 
-        during the GitHub App installation.
+        Fetches ALL repositories associated with an installation.
+        Handles GitHub pagination automatically to prevent truncation bugs.
         """
-        data = await self._get_as_user(
-            f"user/installations/{installation_id}/repositories", 
-            user_oauth_token, 
-            params={"per_page": 100} # Grab up to 100 permitted repos at once
-        )
-        return data.get("repositories", [])
+        all_repositories = []
+        
+        # Use pagination endpoint format
+        url = f"user/installations/{installation_id}/repositories" if user_oauth_token else f"installations/{installation_id}/repositories"
+        params = {"per_page": 100}
+
+        while url:
+            if user_oauth_token:
+                # Call using User OAuth Context
+                data, headers = await self._get_as_user(url, user_oauth_token, params=params,return_header=True)
+            else:
+                # Fallback: Call using background Installation Access Token (IAT)
+                data, headers = await self._get_as_app(url, installation_id, params=params,return_header=True)
+
+            all_repositories.extend(data.get("repositories", []))
+
+            # Parse GitHub's Link header for next page pagination tracking
+            url = None
+            params = None # Clear params because next url contains full query string
+            link_header = headers.get("link") or headers.get("Link")
+            if link_header and 'rel="next"' in link_header:
+                # Quick parse string extraction for next URL string
+                links = link_header.split(",")
+                for link in links:
+                    if 'rel="next"' in link:
+                        url = link.split(";")[0].strip("<> ")
+                        break
+
+        return all_repositories
 
 
 
