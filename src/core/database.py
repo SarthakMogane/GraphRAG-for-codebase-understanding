@@ -31,7 +31,7 @@ import time
 from contextlib import asynccontextmanager, contextmanager
 from typing import AsyncGenerator, Optional
 from uuid import UUID
-
+from typing import Callable, AsyncContextManager
 import asyncpg
 from asyncpg import Connection, Pool
 from fastapi import Depends
@@ -215,6 +215,8 @@ async def get_db(
     account_id: Optional[UUID] = None,
     *,
     readonly: bool = False,
+    use_transaction: bool = False,
+    is_system_flow: bool = False,
 ) -> AsyncGenerator[Connection, None]:
     """
     Acquire a database connection with RLS session variable set.
@@ -243,44 +245,43 @@ async def get_db(
     """
     pool = _get_read_pool() if readonly else _get_write_pool()
 
+    if account_id == "":
+        raise ValueError("CRITICAL BUG: Empty string account_id detected in get_db!")
+    if account_id is not None and not isinstance(account_id, UUID):
+        raise ValueError(f"CRITICAL BUG: Non-UUID account_id detected: {type(account_id)} - {account_id}")
+    
     async with pool.acquire() as conn:
-        if account_id:
-            # Set RLS session variable — Postgres RLS policies read this
-            # Use a local transaction to scope the variable
-            await conn.execute(
-                "SELECT set_config('app.current_account_id', $1, true)",
-                str(account_id),
-            )
-        try:
-            yield conn
-        finally:
-            if account_id:
-                # Clear session variable before returning connection to pool
-                # Even though asyncpg resets connections, be explicit
-                await conn.execute(
-                    "SELECT set_config('app.current_account_id', '', true)"
-                )
+        needs_transaction = use_transaction or account_id is not None or is_system_flow
+        
+        if needs_transaction:
+            async with conn.transaction():
+                if is_system_flow:
+                    await conn.execute("SELECT set_config('app.is_system_flow','true',true)")
+                elif account_id:
+                    await conn.execute(
+                        "SELECT set_config('app.current_account_id', $1, true)",
+                        str(account_id),
+                    )
 
+                yield conn
+        else:
+            yield conn
+        
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FastAPI dependency injection
+# ─────────────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def get_transaction(
     account_id: Optional[UUID] = None,
 ) -> AsyncGenerator[Connection, None]:
     """
-    Acquire a connection and wrap it in an explicit transaction.
-    Use for multi-statement operations that must be atomic.
-
-    Automatically rolls back on any exception.
-
-    Usage:
-        async with get_transaction(account_id=user.account_id) as conn:
-            await conn.execute("INSERT INTO repos ...")
-            await conn.execute("INSERT INTO ingestion_jobs ...")
-            # Both committed together, or both rolled back
+     Acquire a connection and wrap it in an explicit transaction
     """
-    async with get_db(account_id=account_id) as conn:
-        async with conn.transaction():
+    async with get_db(account_id=account_id,readonly=False, use_transaction= True) as conn:
             yield conn
+
 
 @asynccontextmanager
 async def get_system_transaction() -> AsyncGenerator[Connection, None]:
@@ -288,51 +289,51 @@ async def get_system_transaction() -> AsyncGenerator[Connection, None]:
     Acquire a connection wrapped in a transaction with RLS bypassed.
     STRICTLY FOR BACKGROUND WORKERS (SQS/Celery). Never use in FastAPI web routes!
     """
+    async with get_db(is_system_flow=True,readonly=False) as conn:        
+        yield conn
+
+@asynccontextmanager
+async def get_db_session_rls(account_id: UUID) -> AsyncGenerator[Connection, None]:
+    """Acquires a write connection with session-level RLS and NO transaction block."""
     async with _get_write_pool().acquire() as conn:
-        async with conn.transaction():
-            # 1. Set the VIP System Pass
-            await conn.execute(
-                "SELECT set_config('app.is_system_flow', 'true', true)"
-            )
-            
-            try:
-                yield conn
-            finally:
-                # 2. Safety cleanup
-                await conn.execute(
-                    "SELECT set_config('app.is_system_flow', '', true)"
-                )
+        try:
+            # 'false' means it stays alive without a transaction block
+            await conn.execute("SELECT set_config('app.current_account_id', $1, false)", str(account_id))
+            yield conn
+        finally:
+            # Manual cleanup is mandatory to prevent connection pool contamination!
+            await conn.execute("SELECT set_config('app.current_account_id', '', false)")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FastAPI dependency injection
-# ─────────────────────────────────────────────────────────────────────────────
+def get_rls_conn(account_id: UUID = Depends(get_current_account_id)):
+    """Yields a writable connection with RLS set, but genuinely NO transaction."""
+    return get_db_session_rls(account_id=account_id)
 
+DbFactory = Callable[[], AsyncContextManager[Connection]]
 
-async def get_db_dep() -> AsyncGenerator[Connection, None]:
+async def get_db_dep() -> DbFactory:
     """
     FastAPI dependency — no account_id set (for unauthenticated endpoints).
     Most endpoints should use get_authed_db_dep instead.
     """
-    async with get_db() as conn:
-        yield conn
+    # Returns the context manager directly so FastAPI's AsyncExitStack handles the lifecycle
+    return lambda :get_db()
 
 #  Dependency for Multi-Statement Write Transactions ──────────────────────
-async def get_rls_tx_conn(account_id: UUID = Depends(get_current_account_id) ):
-    """Yields a read/write connection wrapped inside an atomic transaction bound by RLS."""
-    async with get_transaction(account_id=account_id) as conn:
-        yield conn
+async def get_rls_tx_conn(account_id: UUID = Depends(get_current_account_id) ) -> DbFactory:
+    """FastAPI Dependency:Yields a read/write connection wrapped inside an atomic transaction bound by RLS."""
+    return lambda: get_transaction(account_id=account_id)
 
-async def get_rls_conn(account_id: UUID = Depends(get_current_account_id)):
-    """Yields a writable connection with RLS set, but NO automatic transaction."""
-    async with get_db(account_id=account_id, readonly=False) as conn:
+async def get_read_db_dep() -> AsyncGenerator[Connection, None]:
+    """FastAPI Dependency: Fetches a raw connection from the READ pool with zero transaction footprint."""
+    async with get_db(readonly=True, use_transaction=False) as conn:
         yield conn
 
 async def get_authed_read_db_dep(
     account_id: UUID = Depends(get_current_account_id),
-) -> AsyncGenerator[Connection, None]:
-    """Dependency for authenticated, read-only endpoints (dashboard loads)."""
-    async with get_db(account_id=account_id, readonly=True) as conn:
-        yield conn
+) -> DbFactory:
+    """FastAPI Dependency for authenticated, highly optimised read-only endpoints."""
+    return lambda: get_db(account_id=account_id, readonly=True,use_transaction=False) 
+    
 
 
 # ─────────────────────────────────────────────────────────────────────────────
