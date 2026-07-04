@@ -1,7 +1,9 @@
 from uuid import UUID 
 from src.core.logger import get_logger
 from src.core.config import get_settings
-from src.core.database import get_transaction ,get_db_dep
+from src.core.database import get_transaction , get_system_transaction
+import asyncpg
+from src.core.exceptions import DatabaseOperationError
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -28,32 +30,47 @@ async def _recover_installations(
  
     if not our_installs:
         return
- 
-    async with get_transaction(account_id=account_id) as conn:
-        for install in our_installs:
-            await conn.execute(
-                """
-                INSERT INTO installations (
-                    account_id, github_install_id, owner_login,
-                    owner_type, owner_github_id, is_active
+    
+    try:
+        async with get_system_transaction() as conn:
+            for install in our_installs:
+                await conn.execute(
+                    """
+                    INSERT INTO installations (
+                        account_id, github_install_id, owner_login,
+                        owner_type, owner_github_id, is_active
+                    )
+                    VALUES ($1, $2, $3, $4, $5, TRUE)
+                    ON CONFLICT (github_install_id)
+                    DO UPDATE SET
+                        account_id  = EXCLUDED.account_id,
+                        is_active   = TRUE,
+                        suspended_at = NULL
+                    """,
+                    account_id,
+                    install["id"],
+                    install["account"]["login"],
+                    install["account"]["type"],
+                    install["account"]["id"],
                 )
-                VALUES ($1, $2, $3, $4, $5, TRUE)
-                ON CONFLICT (github_install_id)
-                DO UPDATE SET
-                    account_id  = EXCLUDED.account_id,
-                    is_active   = TRUE,
-                    suspended_at = NULL
-                """,
-                account_id,
-                install["id"],
-                install["account"]["login"],
-                install["account"]["type"],
-                install["account"]["id"],
-            )
-            logger.info(
-                "Installation recovered: org=%s install_id=%d",
-                install["account"]["login"], install["id"],
-            )
+                logger.info(
+                    "Installation recovered: org=%s install_id=%d",
+                    install["account"]["login"], install["id"],
+                )
+    except DatabaseOperationError:
+        raise
+    
+    except asyncpg.PostgresError as e:
+        # LOG specific DB details (e.g., integrity violations, connection timeouts)
+        logger.error("Postgres error in _recover_installation: %s", e, exc_info=True)
+        # Raise your domain-specific error
+        raise DatabaseOperationError("Database transaction failed")
+        
+    except Exception as e:
+        # LOG unexpected Python logic bugs
+        logger.error("Unexpected error in _recover_installation: %s", e, exc_info=True)
+        raise DatabaseOperationError("Internal system failure")
+
 
 async def _save_installation(
     account_id:UUID ,
@@ -64,27 +81,40 @@ async def _save_installation(
     user who clicked the install button
     Returns True if a new installation was inserted, False if it already existed.
     """
-
-    async with get_transaction(account_id=account_id) as conn:
-        result = await conn.execute(
-            """
-            INSERT INTO installations (account_id, github_install_id,is_active)
-            VALUES ($1, $2 , True)
-            ON CONFLICT (github_install_id) 
-            DO UPDATE SET 
-                account_id = EXCLUDED.account_id,
-                is_active = TRUE,
-                updated_at = NOW();
-            """,account_id,installation_id )
-        
-        # Check if a row was actually inserted
-        was_inserted = result.endswith("1")
-        
-        if was_inserted:
-            logger.info("Installation saved for account: %s", account_id)
-        else:
-            logger.info("Installation %s already exists for account: %s", installation_id, account_id)
+    try:
+        async with get_transaction(account_id=account_id) as conn:
+            result = await conn.execute(
+                """
+                INSERT INTO installations (account_id, github_install_id,is_active)
+                VALUES ($1, $2 , True)
+                ON CONFLICT (github_install_id) 
+                DO UPDATE SET 
+                    account_id = EXCLUDED.account_id,
+                    is_active = TRUE,
+                    updated_at = NOW();
+                """,account_id,installation_id )
             
-        return was_inserted
+            # Check if a row was actually inserted
+            was_inserted = result.endswith("1")
+            
+            if was_inserted:
+                logger.info("Installation saved for account: %s", account_id)
+            else:
+                logger.info("Installation %s already exists for account: %s", installation_id, account_id)
+                
+            return was_inserted
+    
+    except DatabaseOperationError:
+        raise
+    
+    except asyncpg.PostgresError as e:
+        # LOG specific DB details (e.g., integrity violations, connection timeouts)
+        logger.error("Postgres error in _save_installation: %s", e, exc_info=True)
+        # Raise your domain-specific error
+        raise DatabaseOperationError("Database transaction failed")
         
+    except Exception as e:
+        # LOG unexpected Python logic bugs
+        logger.error("Unexpected error in _save_installation: %s", e, exc_info=True)
+        raise DatabaseOperationError("Internal system failure")
     
