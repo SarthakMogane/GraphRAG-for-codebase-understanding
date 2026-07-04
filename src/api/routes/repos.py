@@ -35,7 +35,7 @@ async def get_user_repos(
     Purely observes the database state. Does NOT contact GitHub.
     """
     
-    async with read_conn(account_id=account_id, readonly=True,use_transaction=False) as conn:
+    async with read_conn() as conn:
         db_repos = await conn.fetch(
             "SELECT * FROM repos WHERE account_id = $1 AND index_status != 'inaccessible' ORDER BY updated_at DESC", 
             account_id
@@ -71,7 +71,7 @@ async def get_user_repos(
 
     if encrypted_blob:
         try:
-            decrypted_oauth_token = decrypt_token(encrypted_blob)
+            decrypted_oauth_token = await decrypt_token(encrypted_blob)
         except Exception as e:
             logger.error(f"KMS decryption failure for user {account_id}: {e}")
 
@@ -88,7 +88,7 @@ async def get_user_repos(
     
     if stale_repo_ids:
         logger.warning(f"Reconciliation triggered: Moving {len(stale_repo_ids)} missing repos to inaccessible.")
-        async with write_conn(account_id=account_id) as conn:
+        async with write_conn() as conn:
             await conn.execute(
                 """
                 UPDATE repos 
