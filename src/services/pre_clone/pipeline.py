@@ -132,7 +132,7 @@ class PreClonePipeline:
     
 
         # ── 3. DB cache lookup ─────────────────────────────────────────────
-        existing = await self._lookup_db(parsed.owner, parsed.repo)
+        existing = await self._lookup_db(parsed.owner, parsed.repo,self.conn)
         if existing:
             result.existing_repo_db_id = existing["id"]
 
@@ -232,22 +232,25 @@ class PreClonePipeline:
     # DB helpers
     # ─────────────────────────────────────────────────────────────────────────
 
-    async def _lookup_db(self, owner: str, repo: str) -> Optional[Repository]:
-        return await self.conn.fetchrow(
-            """
-            SELECT 
-                id, 
-                owner_login,
-                repo_name,
-                index_status, 
-                default_branch, 
-                primary_language,
-                index_sha,
-                last_indexed_at
-            FROM repos
-            WHERE owner_login = $1 
-              AND repo_name = $2
-            """,
-            owner, 
-            repo
-        )
+    async def _lookup_db(self, owner: str, repo: str,conn) -> Optional[Repository]:
+        "get repo data for owner of that repo"
+        async with conn() as conn:
+            look_up_data = await conn.fetchrow(
+                """
+                SELECT 
+                    id, 
+                    owner_login,
+                    repo_name,
+                    index_status, 
+                    default_branch, 
+                    primary_language,
+                    index_sha,
+                    last_indexed_at
+                FROM repos
+                WHERE owner_login = $1 
+                AND repo_name = $2
+                """,
+                owner, 
+                repo
+            )
+        return look_up_data
