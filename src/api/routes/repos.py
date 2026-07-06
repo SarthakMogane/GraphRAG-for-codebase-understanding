@@ -6,7 +6,9 @@ from src.database.mock_db import MOCK_DB , MockRepository
 from src.models.database import RepoStatus
 from src.schemas.responses import IndexResponse
 from src.crud.repos_ops import _get_owned_repo ,apply_pipeline_result_to_db
+from src.crud.user import update_user_github_tokens
 from uuid import UUID
+import datetime
 from src.core.database import get_transaction
 from src.services.pre_clone.pipeline import PreClonePipeline
 from src.services.pre_clone.types import ValidationVerdict,RoutingDecision
@@ -16,7 +18,7 @@ from src.utils.services_helpers import get_github_service , get_current_account_
 from src.core.database import get_transaction ,get_db,get_rls_tx_conn , get_authed_read_db_dep
 from src.core.config import get_settings
 from src.core.logger import get_logger
-from src.core.crypto import decrypt_token
+from src.core.crypto import decrypt_token ,encrypt_token
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -45,7 +47,9 @@ async def get_user_repos(
             """
             SELECT  i.github_install_id,
                     i.is_active,
-                    u.oauth_token_enc 
+                    u.oauth_token_enc,
+                    u.oauth_token_expires,
+                    u.refresh_token_enc
             FROM installations i
             LEFT JOIN users u ON u.account_id = i.account_id
             WHERE i.account_id = $1
@@ -72,20 +76,38 @@ async def get_user_repos(
     if encrypted_blob:
         try:
             decrypted_oauth_token = await decrypt_token(encrypted_blob)
+            if auth_row["refresh_token_enc"]:
+                decrypted_refresh_token = await decrypt_token(auth_row["refresh_token_enc"])
         except Exception as e:
             logger.error(f"KMS decryption failure for user {account_id}: {e}")
 
+    async def save_new_tokens(new_access: str, new_refresh: str, token_expires: datetime):
+        # Open your transaction dependency right here
+        async with write_conn() as tx_conn:
+            await update_user_github_tokens(
+                conn=tx_conn,                         # Reuses the request's connection context
+                account_id=account_id,               # Reuses the validated route user ID
+                new_access=new_access,
+                new_refresh=new_refresh,
+                token_expires=token_expires
+            )
+        logger.info(f"Background worker updated persistent tokens for account: {account_id}")
+
     try:
-        live_repos = await github_client.get_installed_repositories(installation_id = installation_id,user_oauth_token = decrypted_oauth_token)
+        live_repos = await github_client.get_installed_repositories(
+            installation_id = installation_id,
+            user_oauth_token = decrypted_oauth_token,
+            refresh_token=decrypted_refresh_token,
+            on_token_refresh=save_new_tokens)
+        
         live_repo_ids = {repo["id"] for repo in live_repos}
     
     except Exception as e:
         logger.error(f"Upstream live sync failed. Falling back to cached DB state: {e}")
         return {"repositories": db_repos}
-
     # Identify entries that are active in DB but missing on GitHub
     stale_repo_ids = db_repo_ids - live_repo_ids
-    
+
     if stale_repo_ids:
         logger.warning(f"Reconciliation triggered: Moving {len(stale_repo_ids)} missing repos to inaccessible.")
         async with write_conn() as conn:
@@ -95,10 +117,10 @@ async def get_user_repos(
                 SET index_status = 'inaccessible', updated_at = NOW()
                 WHERE account_id = $1 AND github_repo_id = ANY($2::bigint[])
                 """,
-                UUID(account_id),
+                account_id,
                 list(stale_repo_ids)
             )
-        return {"repositories": live_repos}
+    return {"repositories":live_repos}
         
 
 # # Note: Changed from {full_name} to {owner}/{repo} so FastAPI parses it automatically for us!
@@ -196,7 +218,7 @@ async def get_user_repos(
 #     return result
 
 
-@router.post("repos/{repo_id}/index",response_model=IndexResponse)
+@router.post("/repos/{repo_id}/index",response_model=IndexResponse)
 async def index_repo(
     repo_id : int,
     request:Request,
@@ -265,7 +287,9 @@ async def index_repo(
         installation_id=installation_id,
         force_refresh=False,
     )
-    github_url = f"https://github.com/{repo.github_owner}/{repo.github_repo}"
+    owner = repo['owner_login']
+    repo_name = repo['repo_name']
+    github_url = f"https://github.com/{owner}/{repo_name}"
     result = await pipeline.run(github_url)
 
     # ── 2. Persist the Result to PostgreSQL ─────────────────────────────
@@ -303,7 +327,8 @@ async def index_repo(
             repo_id=repo_id,
             result=result,
             installation_id=installation_id,
-            conn=db,                         
+            db_factory=db,
+            _gh = _gh                        
         )
 
     # ── 5. Fallback ─────────────────────────────────────────────────────
