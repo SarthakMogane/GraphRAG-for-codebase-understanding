@@ -28,6 +28,7 @@ from tenacity import (
 )
 import asyncio
 from src.core.config import get_settings
+from src.utils.auth_helpers import _parse_token_expiry
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -227,6 +228,7 @@ class GitHubService:
     async def _get_as_app(self, path: str, installation_id: int, params: dict = None, return_header:bool = False) -> dict|tuple[dict, dict]:
         """Authenticated GET using the App Installation Token (Server-to-Server)."""
         token = await self.auth.get_installation_token(installation_id)
+        print("access token",token)
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
@@ -235,15 +237,49 @@ class GitHubService:
         data,response_header = await self._execute_request(path, headers, params)
         return (data,response_header) if return_header else data
 
-    async def _get_as_user(self, path: str, user_oauth_token: str ,params: dict = None,return_header:bool = False) -> dict:
+    async def _get_as_user(self, 
+                           path: str,
+                             user_oauth_token: str ,
+                             params: dict = None,
+                             return_header:bool = False,
+                             refresh_token:str = None,
+                             on_token_refresh: callable = None,  # Callback to save new tokens to your DB
+                             ) -> dict:
         """Authenticated GET using the User's OAuth Token (User-to-Server)."""
         headers = {
             "Authorization": f"Bearer {user_oauth_token}",
             "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
+            "X-GitHub-Api-Version": "2026-03-10",
         }
-        data,response_header =  await self._execute_request(path, headers, params)
-        return (data,response_header) if return_header else data 
+        try:
+            data,response_header =  await self._execute_request(path, headers, params)
+            return (data,response_header) if return_header else data 
+        except httpx.HTTPStatusError as exc:
+        # Intercept 401 Unauthorized (Expired Token)
+            if exc.response.status_code == 401 and refresh_token:
+                logger.info("User OAuth token expired. Attempting refresh...")
+                
+                try:
+                    # 1. Get new tokens from GitHub
+                    new_tokens = await self.refresh_user_oauth_token(refresh_token)
+                    new_access_token = new_tokens["access_token"]
+                    new_refresh_token = new_tokens.get("refresh_token") # GitHub rotates refresh tokens!
+                    
+                    # 2. Persist new tokens to your database via callback
+                    if on_token_refresh:
+                        token_expires = _parse_token_expiry(new_tokens)
+                        await on_token_refresh(new_access_token, new_refresh_token,token_expires,token_expires)
+                    
+                    # 3. Update headers and retry the original request once
+                    headers["Authorization"] = f"Bearer {new_access_token}"
+                    data, response_header = await self._execute_request(path, headers, params)
+                    return (data, response_header) if return_header else data
+                    
+                except Exception as refresh_exc:
+                    logger.error(f"Failed to automatically refresh GitHub OAuth token: {refresh_exc}")
+                    raise refresh_exc
+                
+            raise exc
 
 # update : httpx timeouts configured globally or not.
     async def _execute_request(self, path: str, headers: dict, params: dict = None) -> dict:
@@ -276,8 +312,38 @@ class GitHubService:
             raise
 
 # ── User API Calls (OAuth Token) ──────────────────────────────────────────
+
+    async def refresh_user_oauth_token(self, refresh_token: str) -> dict:
+        """Uses a GitHub user refresh token to obtain a fresh access token."""
+        # Note: GitHub token URL is static and separate from the API base path
+        token_url = httpx.URL("https://github.com/login/oauth/access_token")
+        
+        payload = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": settings.GITHUB_CLIENT_ID,
+            "client_secret": settings.GITHUB_CLIENT_SECRET,
+        }
+        headers = {"Accept": "application/json"}
+        
+       
+        resp = await self.client.post(token_url, data=payload, headers=headers)
+        resp.raise_for_status()
+        
+        token_data = resp.json()
+        if "error" in token_data:
+            raise Exception(f"GitHub OAuth Refresh Error: {token_data.get('error_description')}")
+            
+        return token_data
+
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
-    async def get_installed_repositories(self, installation_id: int, user_oauth_token: str = None) -> list:
+    async def get_installed_repositories(
+        self, installation_id: int,
+        user_oauth_token: str = None,
+        refresh_token: str = None, 
+        on_token_refresh: callable = None
+    ) -> list:
         """
         Fetches ALL repositories associated with an installation.
         Handles GitHub pagination automatically to prevent truncation bugs.
@@ -285,19 +351,24 @@ class GitHubService:
         all_repositories = []
         
         # Use pagination endpoint format
-        url = f"user/installations/{installation_id}/repositories" if user_oauth_token else f"installations/{installation_id}/repositories"
+        url = f"user/installations/{installation_id}/repositories" if user_oauth_token else f"installation/repositories"
         params = {"per_page": 100}
 
         while url:
             if user_oauth_token:
                 # Call using User OAuth Context
-                data, headers = await self._get_as_user(url, user_oauth_token, params=params,return_header=True)
+                data, headers = await self._get_as_user(
+                    url,
+                    user_oauth_token,
+                    params=params,
+                    return_header=True,
+                    refresh_token=refresh_token,
+                    on_token_refresh=on_token_refresh)
             else:
                 # Fallback: Call using background Installation Access Token (IAT)
                 data, headers = await self._get_as_app(url, installation_id, params=params,return_header=True)
-
-            all_repositories.extend(data.get("repositories", []))
-
+    
+            all_repositories.extend(data['repositories'])
             # Parse GitHub's Link header for next page pagination tracking
             url = None
             params = None # Clear params because next url contains full query string
@@ -307,9 +378,10 @@ class GitHubService:
                 links = link_header.split(",")
                 for link in links:
                     if 'rel="next"' in link:
-                        url = link.split(";")[0].strip("<> ")
+                        next_url = link.split(";")[0].strip("<> ")
+                        path = next_url.replace("https://api.github.com", "").lstrip("/")
                         break
-
+            
         return all_repositories
 
 
@@ -358,13 +430,13 @@ class GitHubService:
             github_id=data["id"],
             default_branch=data["default_branch"],
             primary_language=data.get("language"),
-            size_kb=data["size"],
+            size=data["size"],
             is_fork=data["fork"],
             parent_info = parsed_parent,
-            is_private=data["private"],
+            private=data["private"],
             # Add this! Tells you if it is 'public', 'private', or 'internal'
             visibility=data.get("visibility", "private"),
-            is_archived=data["archived"],
+            archived=data["archived"],
             is_empty=data["size"] == 0,
             is_disabled = data.get("disabled"),
             is_template = data.get("is_template"),
