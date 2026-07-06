@@ -9,8 +9,25 @@ from src.core.logger import get_logger
 from src.core.database import get_system_transaction
 import asyncpg
 from src.core.exceptions import DatabaseOperationError
+from src.core.crypto import encrypt_token
 
 logger = get_logger(__name__)
+
+async def update_user_github_tokens(tx_conn,account_id ,new_access: str, new_refresh: str, token_expires: datetime):
+        expires_at = token_expires
+        await tx_conn.execute(
+            """
+            UPDATE users 
+            SET oauth_token_enc = $1, oauth_token_expires = $2, refresh_token_enc = $3
+            WHERE account_id = $4
+            """,
+            encrypt_token(new_access),
+            expires_at,
+            encrypt_token(new_refresh),
+            account_id
+        )
+        logger.info(f"Background worker encrypted and persistent updated tokens for account: {account_id}")
+
  
 async def _upsert_user(
     github_user: dict,
