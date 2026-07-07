@@ -7,13 +7,14 @@ from src.services.pre_clone.types import ValidationVerdict, RoutingDecision, Val
 
 logger = get_logger(__name__)
 
-async def _get_indexed_repos(conn) -> dict[str, int]:
+async def _get_indexed_repos(db_factory) -> dict[str, int]:
     "return the users indexed repos "
-    indexed_rows = await conn.fetch(
+    async with db_factory() as conn:
+        indexed_rows = await conn.fetch(
             "SELECT owner_login, repo_name, id FROM repos WHERE index_status = 'ready'"
         )
 
-    return {f"{r.github_owner}/{r.github_repo}": r.id for r in indexed_rows}
+    return {f'{r["owner_login"]}/{r["repo_name"]}': r["github_repo_id"] for r in indexed_rows}
 
 async def _upsert_repos_in_conn(
     conn,
@@ -125,24 +126,29 @@ async def _get_owned_repo(
     Returns the Repository record only if it belongs to account_id.
     Always returns 404 (never 403) to prevent existence enumeration.
     """
-    row = await conn.fetchrow(
-        """
-        SELECT 
-            r.id, 
-            r.account_id, 
-            r.repo_name, 
-            r.github_repo_id, 
-            r.index_status,
-            i.github_install_id
-        FROM repos r
-        INNER JOIN installations i
-        ON i.id = r.installation_id 
-        WHERE id = $1 
-          AND account_id = $2
-        """,
-        repo_id, 
-        account_id,
-    )
+    async with conn() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT 
+                r.id, 
+                r.account_id, 
+                r.owner_login,
+                r.repo_name, 
+                r.github_repo_id, 
+                r.full_name,
+                r.index_status,
+                r.last_scout_sha,
+                r.auto_sync_enabled,
+                i.github_install_id
+            FROM repos r
+            INNER JOIN installations i
+            ON i.id = r.installation_id 
+            WHERE github_repo_id = $1 
+            AND r.account_id = $2
+            """,
+            repo_id, 
+            account_id,
+        )
 
     if not row:
         # Deliberately 404, not 403 — don't reveal whether repo_id exists
@@ -153,7 +159,7 @@ async def _get_owned_repo(
 
 
 async def apply_pipeline_result_to_db(
-    conn, 
+    dbfactory, 
     repo_id: int, 
     result: ValidationResult
 ) -> None:
@@ -175,34 +181,36 @@ async def apply_pipeline_result_to_db(
     try:
         # We always update the status, but only update metadata if github_id exists
         if result.github_id:
-            await conn.execute(
-                """
-                UPDATE repos 
-                SET 
-                    index_status = $1,
-                    github_repo_id = COALESCE($2, github_repo_id),
-                    default_branch = COALESCE($3, default_branch),
-                    primary_language = COALESCE($4, primary_language),
-                    repo_size_kb = COALESCE($5, repo_size_kb),
-                    is_fork = COALESCE($6, is_fork),
-                    updated_at = NOW()
-                WHERE id = $7
-                """,
-                new_status,
-                result.github_id,
-                result.default_branch,
-                result.primary_language,
-                result.size_kb,
-                result.fork_info.is_fork if result.fork_info else None,
-                repo_id
-            )
+            async with dbfactory() as conn:
+                await conn.execute(
+                    """
+                    UPDATE repos 
+                    SET 
+                        index_status = $1,
+                        github_repo_id = COALESCE($2, github_repo_id),
+                        default_branch = COALESCE($3, default_branch),
+                        primary_language = COALESCE($4, primary_language),
+                        size_kb = COALESCE($5, size_kb),
+                        is_fork = COALESCE($6, is_fork),
+                        updated_at = NOW()
+                    WHERE github_repo_id = $7
+                    """,
+                    new_status,
+                    result.github_id,
+                    result.default_branch,
+                    result.primary_language,
+                    result.size_kb,
+                    result.fork_info.is_fork if result.fork_info else None,
+                    repo_id
+                )
         else:
             # If pipeline failed early (no metadata), just update the status
-            await conn.execute(
-                "UPDATE repos SET index_status = $1, updated_at = NOW() WHERE id = $2",
-                new_status,
-                repo_id
-            )
+            async with dbfactory() as conn:
+                await conn.execute(
+                    "UPDATE repos SET index_status = $1, updated_at = NOW() WHERE id = $2",
+                    new_status,
+                    result.existing_repo_db_id
+                )
 
     except asyncpg.PostgresError as db_err:
         logger.error("Failed to apply pipeline result for repo %d: %s", repo_id, db_err)
