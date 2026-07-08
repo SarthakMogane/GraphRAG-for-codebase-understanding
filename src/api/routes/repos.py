@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Request , Depends , Body
+from fastapi import APIRouter, HTTPException, Request , Depends , Body , Query
 from fastapi.responses import RedirectResponse
 from typing import List
 from src.services.github import GitHubService
@@ -28,6 +28,7 @@ router = APIRouter(prefix="/api", tags=["Repositories"])
 
 @router.get("/repos")
 async def get_user_repos(
+    force_sync: bool = Query(default=False),
     account_id :UUID = Depends(get_current_account_id),
     read_conn = Depends(get_authed_read_db_dep),
     write_conn = Depends(get_rls_tx_conn),
@@ -36,91 +37,112 @@ async def get_user_repos(
     """
     Purely observes the database state. Does NOT contact GitHub.
     """
-    
-    async with read_conn() as conn:
-        db_repos = await conn.fetch(
-            "SELECT * FROM repos WHERE account_id = $1 AND index_status != 'inaccessible' ORDER BY updated_at DESC", 
-            account_id
-        )
-
-        auth_row = await conn.fetchrow(
-            """
-            SELECT  i.github_install_id,
-                    i.is_active,
-                    u.oauth_token_enc,
-                    u.oauth_token_expires,
-                    u.refresh_token_enc
-            FROM installations i
-            LEFT JOIN users u ON u.account_id = i.account_id
-            WHERE i.account_id = $1
-            """,
-            account_id
-        )
-
-        db_repo_ids = {row["github_repo_id"] for row in db_repos}
-
-    if not auth_row or not auth_row["github_install_id"]:
-        raise HTTPException(status_code=400, detail="GitHub installation not found for this account.")
-
-    if not auth_row["is_active"]:
-        raise HTTPException(
-            status_code=403, 
-            detail="Your GitHub App installation is suspended or inactive. Please check your GitHub settings."
-        )
-    
-    installation_id = auth_row["github_install_id"]
-
-    decrypted_oauth_token = None
-    encrypted_blob: bytes = auth_row["oauth_token_enc"]  # BYTEA comes out as Python bytes
-
-    if encrypted_blob:
-        try:
-            decrypted_oauth_token = await decrypt_token(encrypted_blob)
-            if auth_row["refresh_token_enc"]:
-                decrypted_refresh_token = await decrypt_token(auth_row["refresh_token_enc"])
-        except Exception as e:
-            logger.error(f"KMS decryption failure for user {account_id}: {e}")
-
-    async def save_new_tokens(new_access: str, new_refresh: str, token_expires: datetime):
-        # Open your transaction dependency right here
-        async with write_conn() as tx_conn:
-            await update_user_github_tokens(
-                conn=tx_conn,                         # Reuses the request's connection context
-                account_id=account_id,               # Reuses the validated route user ID
-                new_access=new_access,
-                new_refresh=new_refresh,
-                token_expires=token_expires
-            )
-        logger.info(f"Background worker updated persistent tokens for account: {account_id}")
-
-    try:
-        live_repos = await github_client.get_installed_repositories(
-            installation_id = installation_id,
-            user_oauth_token = decrypted_oauth_token,
-            refresh_token=decrypted_refresh_token,
-            on_token_refresh=save_new_tokens)
-        
-        live_repo_ids = {repo["id"] for repo in live_repos}
-    
-    except Exception as e:
-        logger.error(f"Upstream live sync failed. Falling back to cached DB state: {e}")
-        return {"repositories": db_repos}
-    # Identify entries that are active in DB but missing on GitHub
-    stale_repo_ids = db_repo_ids - live_repo_ids
-
-    if stale_repo_ids:
-        logger.warning(f"Reconciliation triggered: Moving {len(stale_repo_ids)} missing repos to inaccessible.")
-        async with write_conn() as conn:
-            await conn.execute(
+    if force_sync:
+        async with read_conn() as conn:
+            db_rows = await conn.fetch(
                 """
-                UPDATE repos 
-                SET index_status = 'inaccessible', updated_at = NOW()
-                WHERE account_id = $1 AND github_repo_id = ANY($2::bigint[])
-                """,
-                account_id,
-                list(stale_repo_ids)
+                SELECT
+                    github_repo_id, index_status
+                FROM repos
+                WHERE account_id = $1 AND index_status != 'inaccessible' 
+                ORDER BY updated_at DESC
+                """, account_id
             )
-    return {"repositories":live_repos}
+
+            auth_row = await conn.fetchrow(
+                """
+                SELECT  i.github_install_id,
+                        i.is_active,
+                        u.oauth_token_enc,
+                        u.oauth_token_expires,
+                        u.refresh_token_enc
+                FROM installations i
+                LEFT JOIN users u ON u.account_id = i.account_id
+                WHERE i.account_id = $1
+                """,
+                account_id
+            )
+
+        db_status_map = {row["github_repo_id"]: row["index_status"] for row in db_rows}
+        db_repo_ids = set(db_status_map.keys())
+
+        if not auth_row or not auth_row["github_install_id"]:
+            raise HTTPException(status_code=400, detail="GitHub installation not found for this account.")
+
+        if not auth_row["is_active"]:
+            raise HTTPException(
+                status_code=403, 
+                detail="Your GitHub App installation is suspended or inactive. Please check your GitHub settings."
+            )
+        
+        installation_id = auth_row["github_install_id"]
+
+        decrypted_oauth_token = None
+        encrypted_blob: bytes = auth_row["oauth_token_enc"]  # BYTEA comes out as Python bytes
+
+        if encrypted_blob:
+            try:
+                decrypted_oauth_token = await decrypt_token(encrypted_blob)
+                if auth_row["refresh_token_enc"]:
+                    decrypted_refresh_token = await decrypt_token(auth_row["refresh_token_enc"])
+            except Exception as e:
+                logger.error(f"KMS decryption failure for user {account_id}: {e}")
+
+        async def save_new_tokens(new_access: str, new_refresh: str, token_expires: datetime):
+            # Open your transaction dependency right here
+            async with write_conn() as tx_conn:
+                await update_user_github_tokens(
+                    tx_conn=tx_conn,                         # Reuses the request's connection context
+                    account_id=account_id,               # Reuses the validated route user ID
+                    new_access=new_access,
+                    new_refresh=new_refresh,
+                    token_expires=token_expires
+                )
+            logger.info(f"Background worker updated persistent tokens for account: {account_id}")
+
+        try:
+            live_repos = await github_client.get_installed_repositories(
+                installation_id = installation_id,
+                user_oauth_token = decrypted_oauth_token,
+                refresh_token=decrypted_refresh_token,
+                on_token_refresh=save_new_tokens)
+            
+            live_repo_ids = {repo["id"] for repo in live_repos}
+        
+
+            # Identify entries that are active in DB but missing on GitHub
+            stale_repo_ids = db_repo_ids - live_repo_ids
+
+            if stale_repo_ids:
+                logger.warning(f"Reconciliation triggered: Moving {len(stale_repo_ids)} missing repos to inaccessible.")
+                async with write_conn() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE repos 
+                        SET index_status = 'inaccessible', updated_at = NOW()
+                        WHERE account_id = $1 AND github_repo_id = ANY($2::bigint[])
+                        """,
+                        account_id,
+                        list(stale_repo_ids)
+                    )
+            
+        
+        except Exception as e:
+                logger.error(f"Fallback sync loop failed due to GitHub API error: {e}")
+
+    async with read_conn() as conn:
+        final_repos = await conn.fetch(
+            """
+            SELECT id, github_repo_id, full_name, repo_name, owner_login, 
+                   private, index_status, default_branch, primary_language, size_kb, updated_at
+            FROM repos 
+            WHERE account_id = $1 AND index_status != 'inaccessible'
+            ORDER BY updated_at DESC
+            """, 
+            account_id
+        )
+
+    return {"repositories": [dict(row) for row in final_repos]}
         
 
 # # Note: Changed from {full_name} to {owner}/{repo} so FastAPI parses it automatically for us!
@@ -283,7 +305,7 @@ async def index_repo(
     # not archived, not empty, fork check. Returns ValidationResult.
     pipeline = PreClonePipeline(
         github_service=_gh,
-        conn=db,
+        dbfactory=db,
         installation_id=installation_id,
         force_refresh=False,
     )
@@ -295,7 +317,7 @@ async def index_repo(
     # ── 2. Persist the Result to PostgreSQL ─────────────────────────────
     # This single helper automatically translates the verdict/routing into the 
     # correct string ('inaccessible', 'ready', 'pending') and merges the GitHub metadata.
-    await apply_pipeline_result_to_db(conn=db, repo_id=repo_id, result=result)
+    await apply_pipeline_result_to_db(dbfactory=db, repo_id=repo_id, result=result)
 
     # ── 3. Handle Rejections (Early Exit) ───────────────────────────────
     if result.verdict != ValidationVerdict.APPROVED:
