@@ -64,14 +64,24 @@ class MaintenanceWorker:
             # SKIP LOCKED guarantees no deadlocks if you boot 5 relay containers
             pending_jobs = await conn.fetch(
                 """
-                SELECT ij.id, ij.repo_id, ij.job_type, r.default_branch, r.repo_size_kb,
-                       us.selected_subprojects, us.selected_submodules
+                WITH unique_jobs AS (
+                    SELECT DISTINCT ON (ij.repo_id) 
+                        ij.id,
+                        ij.created_at
+                    FROM ingestion_jobs ij
+                    WHERE ij.status = 'dispatch_pending'
+                    ORDER BY ij.repo_id, ij.created_at ASC
+                    LIMIT 10
+                )
+                SELECT ij.id, ij.repo_id, ij.job_type, r.default_branch, r.size_kb,
+                    us.selected_subprojects, us.selected_submodules
                 FROM ingestion_jobs ij
+                JOIN unique_jobs uj ON uj.id = ij.id
                 JOIN repos r ON r.id = ij.repo_id
                 JOIN user_selections us ON us.id = ij.selection_id
-                WHERE ij.status = 'dispatch_pending'
-                ORDER BY ij.created_at ASC LIMIT 10
-                FOR UPDATE SKIP LOCKED
+                ORDER BY uj.created_at ASC
+                FOR UPDATE SKIP LOCKED;
+
                 """
             )
 
