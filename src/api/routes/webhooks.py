@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Request, HTTPException, Header , Depends
 from src.core.logger import get_logger
-from src.utils.services_helpers import get_sqs_client
-from src.services.github import GitHubService
+from src.utils.services_helpers import get_sqs_client, get_github_service
 from src.core.database import get_system_transaction
 from src.core.config import get_settings
 import json
@@ -17,7 +16,8 @@ async def github_webhook(
     x_hub_signature_256: str = Header(None),
     x_github_event: str = Header(None),
     x_github_delivery: str   = Header(None),
-    sqs_client = Depends(get_sqs_client)
+    sqs_client = Depends(get_sqs_client),
+    github_service = Depends(get_github_service)
 ):
     """Listens for GitHub App events (like installs and uninstalls)."""
     
@@ -25,7 +25,7 @@ async def github_webhook(
     payload_bytes = await request.body()
     
     # 2. Cryptographically verify GitHub sent this using your webhook secret
-    if not GitHubService.validate_webhook_signature(payload_bytes, x_hub_signature_256):
+    if not await github_service.validate_webhook_signature(payload_bytes, x_hub_signature_256):
         logger.error("Webhook signature validation failed!")
          # Still return 200 — GitHub should not retry invalid signatures
         return {"status": "ignored", "reason": "invalid_signature"}
@@ -37,52 +37,70 @@ async def github_webhook(
     payload = await request.json()
     action = payload.get("action")
     
+    is_duplicate_and_done = False
+    need_sqs_retry = False
     #___idempotency check__
     try:
         async with get_system_transaction() as conn:
             existing = await conn.fetchval(
-                "SELECT id FROM webhooks_received WHERE delivery_id = $1",
+                "SELECT processed FROM webhooks_received WHERE delivery_id = $1",
                 x_github_delivery,
             )
-            if existing:
-                logger.info(
-                    "Duplicate webhook — delivery_id=%s already processed",
-                    x_github_delivery,
-                )
-                return {"status": "duplicate", "delivery_id": x_github_delivery}
+             # fetchval returns None if the row does not exist at all
+            if existing is not None:
+                if existing:
+                    if existing is True:
+                        is_duplicate_and_done = True
+                else:
+                    # The row exists but SQS failed last time! We need to retry pushing.
+                    need_sqs_retry = True
+                    logger.info("Exists but Worker processing OR SQS failed last time! retry pushing.")
+
     except Exception as e:
         # DB check failed — proceed anyway, worker will handle idempotency again
         logger.error("Idempotency check failed: %s — proceeding", e)
-
+    
+    if is_duplicate_and_done:
+        logger.info(
+                        "Duplicate webhook — delivery_id=%s already processed",
+                        x_github_delivery,
+                    )
+        return {"status": "duplicate", "delivery_id": x_github_delivery}
+    
       # ── Store raw event for audit + idempotency ───────────────────────────────
     github_install_id = (
         payload.get("installation", {}).get("id")
         or payload.get("installation", {}).get("app_id")
     )
 
-    db_save = False
-
-    try:
-        async with get_system_transaction() as conn:
-            await conn.execute(
-                """
-                INSERT INTO webhooks_received
-                    (delivery_id, event_type, github_install_id,
-                     repo_full_name, payload, processed)
-                VALUES ($1, $2, $3, $4, $5::jsonb, FALSE)
-                ON CONFLICT (delivery_id) DO NOTHING
-                """,
-                x_github_delivery,
-                x_github_event,
-                github_install_id,
-                payload.get("repository", {}).get("full_name"),
-                json.dumps(payload),
-            )
-        db_save = True
-    except Exception as e:
-        logger.error("Failed to store webhook — delivery=%s: %s", x_github_delivery, e)
-        # Continue to SQS even if DB insert failed — don't lose the event
- 
+    if not need_sqs_retry:
+        db_save = False
+        try:
+            async with get_system_transaction() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO webhooks_received
+                        (delivery_id, event_type, github_install_id,
+                        repo_full_name, payload, processed)
+                    VALUES ($1, $2, $3, $4, $5::jsonb, FALSE)
+                    ON CONFLICT (delivery_id) DO NOTHING
+                    """,
+                    x_github_delivery,
+                    x_github_event,
+                    github_install_id,
+                    payload.get("repository", {}).get("full_name"),
+                    json.dumps(payload),
+                )
+            db_save=True
+            logger.info("Successfully recorded new webhook: %s", x_github_delivery)
+        except Exception as e:
+            logger.error("Failed to store webhook — delivery=%s: %s", x_github_delivery, e)
+            # Continue to SQS even if DB insert failed — don't lose the event
+    else:
+        logger.info(
+            "Retry detected for webhook %s (marked processed=FALSE). Bypassing DB insert, attempting SQS push.",
+            x_github_delivery,
+        )
   
       # ── Enqueue to SQS for async processing ───────────────────────────────────
     try:
@@ -93,14 +111,19 @@ async def github_webhook(
             install_id = github_install_id,
             payload=payload,
         )
-    
+        logger.info("successfully enqueue")
     except Exception as e:
         logger.error(
             "Failed to enqueue webhook to SQS — delivery=%s: %s",
             x_github_delivery, e,
         )
         if db_save:
-            return {"status":"saved to db only", "delivery_id":x_github_delivery}
+            raise HTTPException(
+                status_code=500, 
+                detail="Saved to database.Queue Faild ! Please retry."
+            )
+            
+            
         else:
            raise HTTPException(
                 status_code=500, 
