@@ -23,7 +23,7 @@ async def _handle_repository_metadata(payload: dict,delivery_id:str) -> None:
     is_archived = repo_data.get("archived", False)
     
     # We only care about metadata changes
-    relevant_actions = {"renamed", "privatized", "publicized", "archived", "unarchived"}
+    relevant_actions = {"renamed", "privatized", "publicized", "archived", "unarchived","transferred"}
     if action not in relevant_actions:
         return
 
@@ -36,14 +36,82 @@ async def _handle_repository_metadata(payload: dict,delivery_id:str) -> None:
             # We update the name and the privacy flag simultaneously.
             # If a repo is archived, we can mark it stale/inaccessible if desired,
             # but updating the name is the critical part here.
-            if action == "archived":
+
+            if action == "transferred":
+                # When a transfer occurs, the repo is now under a different app installation footprint context.
+                # Look up if the target destination profile already has our GitHub App installed.
+                target_auth = await conn.fetchrow(
+                    "SELECT github_install_id, account_id FROM installations WHERE owner_login = $1 AND is_active = TRUE",
+                    owner_login
+                )
+                
+                if target_auth:
+                    # Target workspace has our App! Bind the repo to the new tenant owner securely.
+                    logger.info(
+                    "Repo ID %d transferred to a profile with an active app context. "
+                    "Migrating tenant ownership safely to Account Workspace: %s",
+                    repo_id, target_auth["account_id"]
+                    )
+                    status_tag = await conn.execute(
+                        """
+                        UPDATE repos SET
+                            account_id      = $1,
+                            installation_id = $2,
+                            full_name       = $3,
+                            repo_name       = $4,
+                            owner_login     = $5,
+                            private         = $6,
+                            index_status    = 'not_indexed', -- Let the new tenant choose when to index it
+                            updated_at      = NOW()
+                        WHERE github_repo_id = $7
+                        """,
+                        target_auth["account_id"],
+                        target_auth["github_install_id"],
+                        full_name,
+                        repo_name,
+                        owner_login,
+                        is_private,
+                        repo_id
+                    )
+
+                    await conn.execute(
+                    "DELETE FROM user_selections WHERE repo_id = (SELECT id FROM repos WHERE github_repo_id = $1)",
+                    repo_id
+                    )
+                else:
+                    # Target workspace does NOT have our App installed yet.
+                    # Immediately lock the repository data so the old owner loses access!
+                    logger.warning(
+                    "Repo ID %d transferred off-platform to untracked owner '%s'. "
+                    "Enforcing deadbolt lock isolation safety protocol.",
+                    repo_id, owner_login
+                    )
+                    
+                    status_tag = await conn.execute(
+                        """
+                        UPDATE repos SET
+                            full_name    = $1,
+                            repo_name    = $2,
+                            owner_login  = $3,
+                            private      = $4,
+                            index_status = 'inaccessible', -- Deadbolt lock until new owner installs our App
+                            updated_at   = NOW()
+                        WHERE github_repo_id = $5
+                        """,
+                        full_name,
+                        repo_name,
+                        owner_login,
+                        is_private,
+                        repo_id
+                    )
+
+            elif action == "archived":
                 # Lock the repository down so workers stop scanning it
                 status_tag = await conn.execute(
                     """
                     UPDATE repos SET
                         private      = $1,
-                        is_archived  = TRUE,
-                        index_status = 'inaccessible',  -- 👈 Freeze the UI/Pipeline actions
+                        index_status = 'inaccessible', 
                         updated_at   = NOW()
                     WHERE github_repo_id = $2
                     """,
@@ -57,7 +125,6 @@ async def _handle_repository_metadata(payload: dict,delivery_id:str) -> None:
                     """
                     UPDATE repos SET
                         private      = $1,
-                        is_archived  = FALSE,
                         index_status = 'not_indexed',   -- 👈 Let the user re-index it now
                         updated_at   = NOW()
                     WHERE github_repo_id = $2
