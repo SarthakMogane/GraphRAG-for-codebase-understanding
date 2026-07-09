@@ -21,14 +21,14 @@ so the caller knows exactly why a repo was rejected.
 import logging
 from typing import Optional
 from src.services.github import RateLimitError , RepoMetadata
-
+from src.core.logger import get_logger
 import httpx
 
 from src.services.pre_clone.types import (
     ParsedURL, ValidationVerdict,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Minimum repo size in KB to be worth indexing.
 # GitHub reports 0 KB for a repo with only a README commit, but 1+ KB for anything real.
@@ -122,12 +122,12 @@ async def validate_repo_exists_and_accessible(
         )
 
     # ── Check 2: Visibility ───────────────────────────────────────────────────
-    if not metadata.is_private:
+    if metadata.is_private is False or getattr(metadata, "visibility", "").lower() == "public":
         raise RepoValidationError(
             ValidationVerdict.REPO_PUBLIC,
             f"{owner}/{repo} is a public repository. "
             f"Only private repositories are supported in the current version. "
-            f"Do your repo private !"
+            f"Please change your repository visibility state to private directly on GitHub!"
         )
 
     # ── Check 3: Archived ─────────────────────────────────────────────────────
@@ -151,11 +151,6 @@ async def validate_repo_exists_and_accessible(
             f"This typically means a Terms of Service violation or DMCA takedown."
         )
     
-    if metadata.visibility == "public":
-        raise RepoValidationError(
-            ValidationVerdict.REPO_PUBLIC,
-            f"{owner}/{repo} has visibility '{metadata.visibility}'. Only private repositories are supported."
-        )
 
     # ── Check 5: Empty repository ─────────────────────────────────────────────
     if metadata.is_empty:

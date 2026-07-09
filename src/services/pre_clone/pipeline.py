@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from src.core.logger import get_logger
 from typing import Optional
-
+from src.core.database import DbFactory
 from src.models.database import Repository, RepoStatus
 from src.services.github import GitHubService
 from src.services.pre_clone.rate_limit_checker import check_rate_limit
@@ -77,12 +77,12 @@ class PreClonePipeline:
     def __init__(
         self,
         github_service: GitHubService,
-        conn,
+        dbfactory:DbFactory,
         installation_id: int,
         force_refresh: bool = False,
     ):
         self.gh              = github_service
-        self.conn             = conn
+        self.db_factory      = dbfactory
         self.installation_id = installation_id
         self.force_refresh   = force_refresh  # on retry
 
@@ -132,13 +132,13 @@ class PreClonePipeline:
     
 
         # ── 3. DB cache lookup ─────────────────────────────────────────────
-        existing = await self._lookup_db(parsed.owner, parsed.repo,self.conn)
+        existing = await self._lookup_db(parsed.owner, parsed.repo,self.db_factory)
         if existing:
             result.existing_repo_db_id = existing["id"]
 
             # 4. Already processing?
             if not self.force_refresh:
-                active = await check_already_processing(existing, self.conn)
+                active = await check_already_processing(existing, self.db_factory)
                 if active:
                     return ValidationResult(
                         parsed_url=parsed,
@@ -154,7 +154,7 @@ class PreClonePipeline:
 
             # Staleness check for READY repos
             if existing["index_status"] == RepoStatus.READY and not self.force_refresh:
-                stale = await check_staleness(existing, self.gh, self.installation_id, self.conn)
+                stale = await check_staleness(existing, self.gh, self.installation_id, self.db_factory)
                 result.stale_check = stale
                 if not stale.is_stale:
                     result.routing = RoutingDecision.SERVE_CACHE
@@ -232,9 +232,9 @@ class PreClonePipeline:
     # DB helpers
     # ─────────────────────────────────────────────────────────────────────────
 
-    async def _lookup_db(self, owner: str, repo: str,conn) -> Optional[Repository]:
+    async def _lookup_db(self, owner: str, repo: str,db_factory:DbFactory) -> Optional[Repository]:
         "get repo data for owner of that repo"
-        async with conn() as conn:
+        async with db_factory() as conn:
             look_up_data = await conn.fetchrow(
                 """
                 SELECT 
