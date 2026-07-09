@@ -57,24 +57,32 @@ button.secondary:hover { background:#30363d; }
     <h2>Connect your Code</h2>
     <button class="primary" onclick="waitForInstall()">Connect GitHub Repositories</button>
 </div>
-
 <div id="setup-section" class="card hidden">
-    <h3>Your repositories</h3>
-    <div id="repo-list" class="repo-list">Loading repositories...</div>
-</div>
 
-<div id="scout-section" class="card hidden">
-    <div class="scout-header">
-        <h2 id="scout-title">Select what to index</h2>
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+        <h3 style="margin:0;">Your repositories</h3>
+
+        <button id="btn-sync-github"
+                onclick="fetchRepos(true)"
+                style="background:#21262d;
+                       color:#c9d1d9;
+                       border:1px solid #30363d;
+                       padding:8px 14px;
+                       border-radius:8px;
+                       font-weight:600;
+                       cursor:pointer;
+                       display:flex;
+                       align-items:center;
+                       gap:6px;">
+            <span id="sync-icon">🔄</span>
+            Sync with GitHub
+        </button>
     </div>
-    
-    <div id="scout-subprojects"></div>
-    <div id="scout-submodules" style="margin-top: 20px;"></div>
-    
-    <div style="display:flex; justify-content:flex-end; gap:12px; margin-top:20px;">
-        <button class="secondary" onclick="cancelScout()">Cancel</button>
-        <button class="primary" id="confirm-scout-btn">Confirm & Index ↗</button>
+
+    <div id="repo-list" class="repo-list">
+        Loading repositories...
     </div>
+
 </div>
 <!-- Fully Centered Fixed Overlay Modal Window Wrapper -->
 <div id="sync-confirm-box" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(4px); z-index: 99999; align-items: center; justify-content: center;">
@@ -103,15 +111,6 @@ button.secondary:hover { background:#30363d; }
             </button>
         </div>
     </div>
-</div>
-
-<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-    <h2 style="color: white; margin: 0;">Your Repositories</h2>
-    
-    <!-- Manual Sync Fallback Controller Trigger Button -->
-    <button id="btn-sync-github" onclick="fetchRepos(true)" style="background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 6px 14px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 6px;">
-        <span id="sync-icon">🔄</span> Sync with GitHub
-    </button>
 </div>
 
 <!-- Soft Scale-In Entrance Animation Styling rules for smooth rendering profile -->
