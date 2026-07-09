@@ -22,17 +22,19 @@ from src.schemas.requests import SelectionPayload
 from src.schemas.responses import SelectionResponse
 from src.core.config import get_settings
 from src.core.database import get_db
-from src.services.scout import DeepScout, RepoScoutResult as ScoutResult
+from src.services.scout.deep_scout import DeepScout, RepoScoutResult as ScoutResult
 from src.services.github import GitHubService, InstallationCache
-from src.utils.services_helpers import get_github_service ,_serialize_scout
-from  src.core.database import get_rls_conn ,get_authed_read_db_dep , get_rls_tx_conn
+from src.utils.services_helpers import get_github_service 
+from src.utils.scout_utils import _serialize_scout
+from  src.core.database import get_authed_read_db_dep , get_rls_tx_conn ,DbFactory
 from src.crud.repos_ops import _get_indexed_repos
 from src.crud.jobs import _execute_queue_insertion_raw
 from src.utils.services_helpers import get_current_account_id
+import asyncpg
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
-router = APIRouter()
+router = APIRouter(prefix="/api",tags=["Selections"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -42,7 +44,7 @@ router = APIRouter()
 @router.post("/repos/{repo_id}/scout")
 async def run_scout(
     repo_id: int,
-    conn = Depends(get_rls_conn),
+    db_factory:DbFactory = Depends(get_rls_tx_conn),
     gh: GitHubService = Depends(get_github_service)
 ):
     """
@@ -54,63 +56,80 @@ async def run_scout(
     Expected latency on cache miss: 2–6 seconds.
     Expected latency on cache hit:  < 50ms.
     """
-    #update don't we need to check if ther repo is alreadyl indexed and not stale 
-    async with conn.transcation():
-        repo = await conn.fetchcone(
-                """ SELECT   id, full_name, owner_login, repo_name, default_branch,
-                                index_status, last_scout_sha, installation_id, account_id
-                    FROM repos 
-                    WHERE id = $1
-                    FOR UPDATE NOWAIT """,repo_id
-                )
-        if not repo:
-            raise HTTPException(status_code=404, detail="Repository not found")
+    
+    try:
+        async with db_factory() as conn:
+            repo = await conn.fetchrow(
+                    """ SELECT   r.id, r.full_name, r.owner_login, r.repo_name, r.default_branch,
+                                    r.index_status, r.last_scout_sha, r.installation_id, r.account_id,i.github_install_id
+                        FROM repos r
+                        LEFT JOIN installations i
+                        ON 
+                        i.id = r.installation_id
+                        WHERE github_repo_id = $1
+                         """,repo_id
+                    )  #update:FOR UPDATE NOWAIT is removed because for update is not applicable to the nullble side of outer join
+            if not repo:
+                raise HTTPException(status_code=404, detail="Repository not found")
 
-        if repo["index_status"] in ("scouting", "pending", "indexing"):
+            if repo["index_status"] in ("scouting", "indexing","submodules","cloning","filtering","manifesting"
+                                        ,"inaccessible"):
+                raise HTTPException(
+                    status_code=409, 
+                    detail=f"Action locked: Repository is currently in '{repo['index_status']}' status."
+                )
+
+            installation_id = repo["github_install_id"]
+            if not installation_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Repository verification halted: No GitHub App installation context bound.",
+                )
+
+            await conn.execute("UPDATE repos SET index_status = 'scouting', updated_at = NOW() WHERE id = $1", repo["id"])
+
+    except asyncpg.LockNotAvailableError:
             raise HTTPException(
                 status_code=409, 
-                detail=f"Action locked: Repository is currently in '{repo['index_status']}' status."
+                detail="Repository is currently being locked and modified by another worker process."
             )
-
-        installation_id = repo["installation_id"]
-        if not installation_id:
-            raise HTTPException(
-                status_code=400,
-                detail="Repository verification halted: No GitHub App installation context bound.",
-            )
-
+    
+    try:
         # ── Check cache: if HEAD SHA unchanged, serve cached result instantly ─────
         # Uses GitHubService method — no raw httpx, no _headers() call
         live_sha = await gh.get_live_head_sha(
             repo["owner_login"], repo["repo_name"],
-            repo["default_branch"], installation_id,     #update : we are checking sha just so its not stale so if stale then we need to scout for thta perticular part only . maybe check is stale.? 
+            repo["default_branch"], installation_id,     #update : we are checking sha just so its not stale so if stale then we need to scout for thta perticular part only . maybe check is stale.? and no need if the user coming with pipeline just get that live sha from pipeline .  
         )
 
         if live_sha and live_sha == repo["last_scout_sha"]:
-            cached_json = await conn(
-                """
-                SELECT scout_json 
-                FROM repo_scout_results
-                WHERE repo_id = $1 AND head_sha = $2 
-                LIMIT 1
-                """,repo_id ,live_sha
+            async with db_factory() as conn:
+                cached_json =await conn.fetchrow(
+                        """
+                        SELECT scout_json 
+                        FROM repo_scout_results
+                        WHERE repo_id = $1 AND head_sha = $2 
+                        LIMIT 1
+                        """,repo["id"] ,live_sha
 
-            )
-            if cached_json:
-                logger.info(
-                    "Scout cache hit: %s SHA=%s", repo["full_name"], live_sha[:8]
-                )
-                return {
-                    "cached": True,
-                    "head_sha": live_sha,
-                    "scout": json.loads(cached_json),
-                }
+                    )
+                if cached_json:
+                    logger.info(
+                        "Scout cache hit: %s SHA=%s", repo["full_name"], live_sha[:8]
+                    )
+                    await conn.execute(
+                            "UPDATE repos SET index_status = 'awaiting_ui', updated_at = NOW() WHERE id = $1", 
+                            repo["id"]
+                        )
+                    return {
+                        "cached": True,
+                        "head_sha": live_sha,
+                        "scout": cached_json,
+                    }
 
         # ── Cache miss — run the scout ─────────────────────────────────────────────
-        await conn.execute("UPDATE repos SET index_status = 'scouting', updated_at = NOW() WHERE id = $1", repo_id)
-
-    try:
-        already_indexed = await _get_indexed_repos(conn)
+    
+        already_indexed = await _get_indexed_repos(db_factory)
 
         # Create shared InstallationCache — passed to DeepScout so it can be
         # reused by SubmoduleDecisionTree in Phase 3 (same org lookups, 0 extra calls)
@@ -123,33 +142,37 @@ async def run_scout(
             install_cache=install_cache,
         )
         result: ScoutResult = await scout.run(
-            owner=repo.github_owner,
-            repo=repo.github_repo,
-            branch=repo.default_branch,
+            owner=repo["owner_login"],
+            repo=repo["repo_name"],
+            branch=repo["default_branch"],
         )
 
         result_dict = _serialize_scout(result)
         result_json_str = json.dumps(result_dict)
 
-        async with conn.transaction(): 
+        async with db_factory() as conn: 
             await conn.execute(
                 """
-                INSERT INTO repo_scout_results (repo_id, head_sha, scout_json, api_calls_made, duration_ms, created_at)
-                VALUES ($1, $2, $3, $4, $5, NOW())
-                ON CONFLICT (repo_id, head_sha) DO UPDATE SET scout_json = EXCLUDED.scout_json, created_at = NOW()
+                INSERT INTO repo_scout_results (repo_id,account_id,head_sha, scout_json, api_calls_made, duration_ms, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6 ,NOW())
+                ON CONFLICT (repo_id, head_sha)
+                DO UPDATE SET scout_json = EXCLUDED.scout_json, created_at = NOW()
+                WHERE repo_scout_results.repo_id = $1
                 """,
-                repo_id, live_sha or "unknown", result_json_str, result.api_calls_made, result.scout_duration_ms
+                repo["id"],
+                repo['account_id'],
+                live_sha or "unknown", result_json_str, result.api_calls_made, result.scout_duration_ms
             )
 
             await conn.execute(
                 "UPDATE repos SET last_scout_sha = $1, last_scout_at = NOW(), index_status = 'awaiting_ui', updated_at = NOW() WHERE id = $2",
-                live_sha or "unknown", repo_id
+                live_sha or "unknown", repo["id"]
             )
         
 
         logger.info(
             "Scout complete: %s — %d submodules, %d subprojects, %dms, %d API calls",
-            repo.full_name,
+            repo["full_name"],
             result.total_submodules,
             len(result.subprojects),
             result.scout_duration_ms,
@@ -164,11 +187,14 @@ async def run_scout(
     
     
     except Exception as e:
-        # Emergency fallbacks run in an isolated transaction block
-        async with conn.transaction():
-            await conn.execute("UPDATE repos SET index_status = 'failed', updated_at = NOW() WHERE id = $1", repo_id)
+        # Emergency fallbacks run in an isolated transaction block  ---update index status 
+        async with db_factory() as conn:
+            await conn.execute("UPDATE repos SET index_status = 'failed', updated_at = NOW() WHERE id = $1", repo["id"])
         logger.exception("Scout operation crashed out during network sync phase for repo: %s", repo_id)
-        raise HTTPException(status_code=500, detail=f"Structural profiling engine network error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Structural profiling engine network error: {str(e)}"
+        )
 
 
 
@@ -181,14 +207,17 @@ async def get_scout(
     repo_id: int, 
     conn = Depends(get_authed_read_db_dep) 
 ):
-    repo = await conn.fetchrow("SELECT last_scout_sha, last_scout_at FROM repos WHERE id = $1", repo_id)
-    if not repo or not repo["last_scout_sha"]:
-        raise HTTPException(status_code=404, detail="No blueprint data tracked for this repository instance.")
+    async with conn() as conn:
+        repo = await conn.fetchrow("SELECT last_scout_sha, last_scout_at ,id FROM repos WHERE github_repo_id = $1", repo_id)
 
-    cached_json = await conn.fetchval(
-        "SELECT scout_json FROM repo_scout_results WHERE repo_id = $1 AND head_sha = $2 LIMIT 1",
-        repo_id, repo["last_scout_sha"]
-    )
+        if not repo or not repo["last_scout_sha"]:
+            raise HTTPException(status_code=404, detail="No blueprint data tracked for this repository instance.")
+
+        cached_json = await conn.fetchval(
+            "SELECT scout_json FROM repo_scout_results WHERE repo_id = $1 AND head_sha = $2 LIMIT 1",
+            repo["id"], repo["last_scout_sha"]
+        )
+
     if not cached_json:
         raise HTTPException(status_code=404, detail="Cached blueprint metadata missing from storage schemas.")
 
@@ -206,7 +235,7 @@ async def get_scout(
 async def submit_selection(
     repo_id: int,
     payload: SelectionPayload, 
-    conn = Depends(get_rls_tx_conn),
+    db_factory:DbFactory = Depends(get_rls_tx_conn),
     account_id: UUID = Depends(get_current_account_id)):
     """
     Submit the user's checklist selections from Phase 2 UI.
@@ -219,14 +248,25 @@ async def submit_selection(
     If start_immediately=True (default): queues ingestion right away.
     If start_immediately=False: saves only, user must call /select/confirm.
     """
-    repo = await conn.fetchrow("SELECT account_id, last_scout_sha, default_branch, repo_size_kb FROM repos WHERE id = $1", repo_id)
-    if not repo:
-        raise HTTPException(status_code=404, detail="Target repository reference invalid.")
+    async with db_factory() as conn:
+        repo = await conn.fetchrow("""SELECT 
+                                   r.id,
+                                   r.account_id, r.last_scout_sha, r.default_branch, r.size_kb,
+                                   u.id as user_id
+                                   FROM repos r
+                                   LEFT JOIN users u
+                                   ON 
+                                   u.account_id = r.account_id
 
-    scout_row = await conn.fetchrow(
-        "SELECT id, scout_json FROM repo_scout_results WHERE repo_id = $1 AND head_sha = $2 LIMIT 1",
-        repo_id, repo["last_scout_sha"] or ""
-    )
+                                   WHERE github_repo_id = $1
+                                   """, repo_id)
+        if not repo:
+            raise HTTPException(status_code=404, detail="Target repository reference invalid.")
+
+        scout_row = await conn.fetchrow(
+            "SELECT id, scout_json FROM repo_scout_results WHERE repo_id = $1 AND head_sha = $2 LIMIT 1",
+            repo['id'], repo["last_scout_sha"] or ""
+        )
     if not scout_row:
         raise HTTPException(status_code=400, detail="Prerequisite profile structure validation snapshot missing. Run scout invocation path first.")
 
@@ -246,29 +286,31 @@ async def submit_selection(
          raise HTTPException(status_code=422, detail=f"Submodule path selection rejected due to insufficient account permissions or configuration properties: {sorted(invalid_sm)}")
 
     # Raw high performance query mapping upsert execution pattern
-
-    selection_id = await conn.fetchval(
-        """
-        INSERT INTO user_selections (
-            repo_id, scout_result_id, selected_subprojects, selected_submodules, 
-            deselected_subprojects, deselected_submodules, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
-        ON CONFLICT (repo_id) DO UPDATE SET 
-            scout_result_id = EXCLUDED.scout_result_id,
-            selected_subprojects = EXCLUDED.selected_subprojects,
-            selected_submodules = EXCLUDED.selected_submodules,
-            deselected_subprojects = EXCLUDED.deselected_subprojects,
-            deselected_submodules = EXCLUDED.deselected_submodules,
-            updated_at = NOW()
-        RETURNING id
-        """,
-        repo_id, scout_row["id"], payload.selected_subprojects, payload.selected_submodules,
-        payload.deselected_subprojects, payload.deselected_submodules
-    )
+    async with db_factory() as conn:
+        selection_id = await conn.fetchval(
+            """
+            INSERT INTO user_selections (
+                repo_id, account_id ,created_by_user_id,scout_result_id, selected_subprojects, selected_submodules, 
+                deselected_subprojects, deselected_submodules, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8,NOW())
+            ON CONFLICT (repo_id) DO UPDATE SET 
+                scout_result_id = EXCLUDED.scout_result_id,
+                selected_subprojects = EXCLUDED.selected_subprojects,
+                selected_submodules = EXCLUDED.selected_submodules,
+                deselected_subprojects = EXCLUDED.deselected_subprojects,
+                deselected_submodules = EXCLUDED.deselected_submodules,
+                updated_at = NOW()
+            WHERE user_selections.account_id = $2
+            RETURNING id
+            
+            """,
+            repo["id"],repo["account_id"] ,repo["user_id"],scout_row["id"], payload.selected_subprojects, payload.selected_submodules,
+            payload.deselected_subprojects, payload.deselected_submodules
+        )
 
     job_id = None
     if payload.start_immediately:
-        job_id = await _execute_queue_insertion_raw(conn, repo_id, selection_id,account_id)
+        job_id = await _execute_queue_insertion_raw(db_factory, repo["id"], selection_id,account_id)
 
     return SelectionResponse(
         selection_id=selection_id, repo_id=repo_id, job_id=job_id,
@@ -285,23 +327,23 @@ async def submit_selection(
 @router.get("/repos/{repo_id}/select")
 async def get_selection(
     repo_id: int,
-    conn = Depends(get_authed_read_db_dep)
+    db_factory:DbFactory = Depends(get_authed_read_db_dep)
 ):
     """Return the current saved selections for a repo."""
-    
-    selection = await conn.fetchone(
-        """ 
-        SELECT 
-            id, 
-            selected_subprojects, 
-            selected_submodules, 
-            deselected_subprojects, 
-            deselected_submodules, 
-            updated_at 
-        FROM user_selections 
-        WHERE repo_id = $1
-        """,repo_id
-    )
+    async with db_factory() as conn:
+        selection = await conn.fetchone(
+            """ 
+            SELECT 
+                id, 
+                selected_subprojects, 
+                selected_submodules, 
+                deselected_subprojects, 
+                deselected_submodules, 
+                updated_at 
+            FROM user_selections 
+            WHERE repo_id = $1
+            """,repo_id
+        )
 
     if not selection:
         raise HTTPException(
@@ -326,23 +368,24 @@ async def get_selection(
 @router.post("/repos/{repo_id}/select/confirm")
 async def confirm_and_ingest(
     repo_id: int,
-    conn = Depends(get_rls_tx_conn),
+    db_factory:DbFactory = Depends(get_rls_tx_conn),
     account_id:UUID = Depends(get_current_account_id)
 ):
     """
     Start Phase 3 ingestion using the currently saved selections.
     Called when user clicks "Confirm & Index" after reviewing the checklist.
     """
-    repo = await conn.fetchrow("SELECT default_branch, repo_size_kb, last_scout_sha FROM repos WHERE id = $1", repo_id)
-    if not repo:
-         raise HTTPException(status_code=404, detail="Target repository reference index missing.")
+    async with db_factory() as conn:
+        repo = await conn.fetchrow("SELECT id ,default_branch, size_kb, last_scout_sha FROM repos WHERE github_repo_id = $1", repo_id)
+        if not repo:
+            raise HTTPException(status_code=404, detail="Target repository reference index missing.")
 
-    selection = await conn.fetchrow("SELECT id FROM user_selections WHERE repo_id = $1", repo_id)
-    if not selection:
-        raise HTTPException(status_code=400, detail="No active saved component selection found.")
+        selection = await conn.fetchrow("SELECT id FROM user_selections WHERE repo_id = $1", repo["id"])
+        if not selection:
+            raise HTTPException(status_code=400, detail="No active saved component selection found.")
 
     # Triggers the safety locked job runner
-    job_id = await _execute_queue_insertion_raw(conn, repo_id, selection["id"], account_id)
+    job_id = await _execute_queue_insertion_raw(db_factory, repo["id"], selection["id"], account_id)
 
     return {"job_id": job_id, "message": "Phase 3 background ingestion task initialized successfully."}
 
