@@ -76,6 +76,54 @@ button.secondary:hover { background:#30363d; }
         <button class="primary" id="confirm-scout-btn">Confirm & Index ↗</button>
     </div>
 </div>
+<!-- Fully Centered Fixed Overlay Modal Window Wrapper -->
+<div id="sync-confirm-box" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(4px); z-index: 99999; align-items: center; justify-content: center;">
+    
+    <!-- Modal Card Container Frame Box (Large and Centered) -->
+    <div style="background: #161b22; border: 1px solid #30363d; border-radius: 14px; width: 90%; max-width: 550px; box-shadow: 0 12px 40px rgba(0,0,0,0.66); padding: 28px; display: flex; flex-direction: column; gap: 16px; transform: scale(1); animation: modalReveal 0.2s ease-out-in;">
+        
+        <!-- Header Row Layout Component Context -->
+        <div style="display: flex; align-items: start; gap: 16px;">
+            <div style="font-size: 28px; background: rgba(88, 166, 255, 0.15); color: #58a6ff; padding: 8px; border-radius: 10px; display: flex; align-items: center; justify-content: center;" id="confirm-icon">ℹ️</div>
+            <div style="flex-grow: 1;">
+                <h3 id="confirm-main-text" style="margin: 0; font-weight: 600; color: #f0f6fc; font-size: 18px; line-height: 1.4;"></h3 >
+                <p id="confirm-sub-text" style="margin: 10px 0 0 0; color: #8b949e; font-size: 14px; line-height: 1.5;"></p>
+            </div>
+        </div>
+
+        <!-- Horizontal Divider Line Rule Break -->
+        <div style="border-top: 1px solid #30363d; margin-top: 10px; padding-top: 16px; display: flex; justify-content: flex-end; gap: 12px;">
+            <!-- UI Action Dismiss Control -->
+            <button id="btn-cancel-sync" onclick="document.getElementById('sync-confirm-box').style.display='none'" style="background: transparent; color: #c9d1d9; border: 1px solid #30363d; padding: 10px 20px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 14px; transition: background 0.2s;">
+                Dismiss
+            </button>
+            <!-- UI Action Trigger Control Pipeline Execution -->
+            <button id="btn-proceed-sync" style="background: #238636; color: white; border: 1px solid rgba(240,246,242,0.1); padding: 10px 24px; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 14px; transition: opacity 0.2s;">
+                Proceed & Index
+            </button>
+        </div>
+    </div>
+</div>
+
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+    <h2 style="color: white; margin: 0;">Your Repositories</h2>
+    
+    <!-- Manual Sync Fallback Controller Trigger Button -->
+    <button id="btn-sync-github" onclick="fetchRepos(true)" style="background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 6px 14px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 6px;">
+        <span id="sync-icon">🔄</span> Sync with GitHub
+    </button>
+</div>
+
+<!-- Soft Scale-In Entrance Animation Styling rules for smooth rendering profile -->
+<style>
+@keyframes modalReveal {
+    from { transform: scale(0.96); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+}
+#btn-cancel-sync:hover { background: #21262d; }
+#btn-proceed-sync:hover { background: #2ea44f; }
+</style>
+
 
 <script>
 window.onload = () => {
@@ -171,39 +219,77 @@ function renderProfile(data) {
                 <div style="color:#8b949e; font-size:12px;">Plan: ${data.plan}</div>
             </div>
         </div>
-        <a href="http://127.0.0.1:8000/auth/logout" style="color:#ff7b72; text-decoration:none; font-weight:600; font-size:14px;">Logout ↗</a>
+        <a href="http://127.0.0.1:8000/logout" style="color:#ff7b72; text-decoration:none; font-weight:600; font-size:14px;">Logout ↗</a>
     `;
 }
 
 /* =========================================
 1. DB-ONLY REPO FETCHING & POLLING
 ========================================= */
+let repoPollAttempts = 0;
 let pollingTimer = null;
+let shouldPoll = false;   // <-- ADD THIS
+const MAX_POLL_ATTEMPTS = 5;
 
-async function fetchRepos() {
+async function fetchRepos(forceSync = false) {
+    const syncBtn = document.getElementById('btn-sync-github');
+    const syncIcon = document.getElementById('sync-icon');
     try {
-        const res = await fetch('http://127.0.0.1:8000/api/repos', { credentials: 'include' });
+        if (forceSync && syncBtn) {
+            syncBtn.disabled = true;
+            syncIcon.style.display = 'inline-block';
+            syncIcon.style.animation = 'spin 1s linear infinite';
+            syncBtn.style.opacity = '0.6';
+        }
+        let url = "http://127.0.0.1:8000/api/repos";
+
+        if (forceSync) {
+            url += "?force_sync=true";
+}
+        const res = await fetch(url, { credentials: 'include' });
         if (!res.ok) throw new Error("Fetch failed");
         
         const data = await res.json();
-        const repos = data.repos; // FIX: Extract array from backend wrapper
+        const repos = data.repositories || []; // FIX: Extract array from backend wrapper
         
         const repoListDiv = document.getElementById('repo-list');
         repoListDiv.innerHTML = '';
 
         if (repos.length === 0) {
-            repoListDiv.innerHTML = `
-                <div style="text-align:center; padding: 40px 20px; color: #8b949e; background: #161b22; border-radius: 12px; border: 1px dashed #30363d;">
-                    <div class="spinner" style="border-top-color: #58a6ff; margin-bottom: 15px;"></div>
-                    <p style="margin:0; font-weight: 600; color: white;">Syncing with GitHub</p>
-                    <p style="margin-top: 5px; font-size: 14px;">Importing your repositories securely. This usually takes a few seconds.</p>
-                </div>
-            `;
-            // Keep polling every 3 seconds until the webhook finishes!
-            if (pollingTimer) clearTimeout(pollingTimer);
-            pollingTimer = setTimeout(fetchRepos, 3000);
-            return; // Stop running the rest of the function
+             repoPollAttempts++;
+
+            if (repoPollAttempts <= MAX_POLL_ATTEMPTS) {
+                // Show syncing state spinner during active waiting window
+                repoListDiv.innerHTML = `
+                    <div style="text-align:center; padding: 40px 20px; color: #8b949e; background: #161b22; border-radius: 12px; border: 1px dashed #30363d;">
+                        <div class="spinner" style="border-top-color: #58a6ff; margin-bottom: 15px;"></div>
+                        <p style="margin:0; font-weight: 600; color: white;">Syncing with GitHub</p>
+                        <p style="margin-top: 5px; font-size: 14px;">Importing your repositories securely. This usually takes a few seconds.</p>
+                    </div>
+                `;
+                // Keep polling every 3 seconds until the webhook finishes!
+                if (shouldPoll) {
+                    pollingTimer = setTimeout(() => fetchRepos(false), 3000);
+                }
+                return; // Stop running the rest of the function
+            }else {
+             // 3. Max attempts reached! Clear timer and show authentic empty state
+                if (pollingTimer) clearTimeout(pollingTimer);
+                repoPollAttempts = 0; // Reset counter
+                
+                repoListDiv.innerHTML = `
+                    <div style="text-align:center; padding: 40px 20px; color: #8b949e; background: #161b22; border-radius: 12px; border: 1px dashed #30363d;">
+                        <p style="margin:0; font-weight: 600; color: white;">No Repositories Found</p>
+                        <p style="margin-top: 5px; font-size: 14px; color: #8b949e;">We couldn't find any repositories on this GitHub installation context.</p>
+                    </div>
+                `;
+                return;
+            }
         }
+        // # 4. If data arrives, successfully reset polling counters and proceed to render
+        repoPollAttempts = 0; 
+        if (pollingTimer) clearTimeout(pollingTimer);
+        repoListDiv.innerHTML = '';
 
         let isAnythingIndexing = false;
 
@@ -219,7 +305,7 @@ async function fetchRepos() {
             card.className = 'repo-card';
             card.innerHTML = `
                 <div class="repo-left">
-                    <div class="repo-icon">${repo.is_private ? '🔒' : '🌍'}</div>
+                    <div class="repo-icon">${repo.private ? '🔒' : '🌍'}</div>
                     <div class="repo-content">
                         <div class="repo-name">${repo.full_name}</div>
                         <div class="repo-meta">ID: ${repo.id} · Updated: ${new Date(repo.updated_at).toLocaleDateString()}</div>
@@ -234,15 +320,33 @@ async function fetchRepos() {
         });
 
         // FIX: The Smart Poller - Only poll if something is actually indexing
-        if (pollingTimer) clearTimeout(pollingTimer);
-        if (isAnythingIndexing) {
-            pollingTimer = setTimeout(fetchRepos, 3000); // Check DB every 3 seconds
+        if (pollingTimer) {
+            clearTimeout(pollingTimer);
+            pollingTimer = null;
         }
+
+        // Only continue polling if the user started an indexing job
+        if (shouldPoll && isAnythingIndexing) {
+            pollingTimer = setTimeout(() => fetchRepos(false), 3000);
+        }
+
+// Job finished -> stop polling completely
+if (shouldPoll && !isAnythingIndexing) {
+    shouldPoll = false;
+}
 
     } catch (err) {
         console.error(err);
+    } finally {
+        // ── FIX: Clean reset for the button styles no matter what happens ──
+        if (syncBtn && syncIcon) {
+            syncBtn.disabled = false;
+            syncIcon.style.animation = 'none';
+            syncBtn.style.opacity = '1';
+        }
     }
 }
+
 
 function buildStatusBadge(repo, status) {
     if (status === 'ready') return `<div class="badge badge-indexed">✓ Indexed</div>`;
@@ -274,7 +378,7 @@ function buildStatusBadge(repo, status) {
 }
 
 function buildActionButton(repo, status) {
-    if (repo.is_private === false) {
+    if (repo.private === false) {
         return `<button class="repo-btn" disabled style="opacity:0.5; cursor:not-allowed;">🔒 Private Only</button>`;
     }
     if (status === 'ready') {
@@ -300,6 +404,9 @@ async function initiateIndex(repoId, repoName) {
         if (data.next === "scout") {
             loadScoutUI(repoId, repoName);
         }
+        if (data.next == "manual_confirm"){
+             handleScoutResponse(data);
+        }
     } catch (err) { alert("Pipeline validation failed."); }
 }
 
@@ -316,7 +423,9 @@ async function loadScoutUI(repoId, repoName) {
     modDiv.innerHTML = '';
 
     try {
-        const res = await fetch(`http://127.0.0.1:8000/api/repos/${repoId}/scout`, { credentials: 'include' });
+        const res = await fetch(`http://127.0.0.1:8000/api/repos/${repoId}/scout`,{
+                    method:'POST' ,
+                    credentials: 'include' });
         const payload = await res.json();
         const scout = payload.scout;
 
@@ -374,7 +483,7 @@ function renderScoutItems(scout, repoId) {
                         <input type="checkbox" class="scout-chk-mod" value="${m.path}" ${checked}>
                         <div>
                             <span class="scout-item-title">${m.name}</span>
-                            <span class="scout-item-meta">${m.is_private ? 'private' : 'public'}</span>
+                            <span class="scout-item-meta">${m.private ? 'private' : 'public'}</span>
                         </div>
                     </div>
                     <div class="badge badge-indexed">Ready</div>
@@ -396,6 +505,10 @@ function cancelScout() {
 3. SUBMIT SELECTION TO JOBS TABLE
 ========================================= */
 async function submitSelection(repoId) {
+    let shouldPoll = false;
+    let pollingTimer = null;
+
+    triggerManualIndexing()
     const projBoxes = document.querySelectorAll('.scout-chk-proj:checked');
     const modBoxes = document.querySelectorAll('.scout-chk-mod:checked');
     
@@ -423,15 +536,89 @@ async function submitSelection(repoId) {
 
         cancelScout();
         document.getElementById('confirm-scout-btn').innerText = "Confirm & Index ↗";
-        
-        // This will instantly start drawing the progress bar and polling
-        fetchRepos();
+
+        shouldPoll = true;          // <-- ADD
+        fetchRepos(false);
 
     } catch (err) {
         alert("Failed to start indexing job.");
         document.getElementById('confirm-scout-btn').innerText = "Confirm & Index ↗";
     }
 }
+
+// Global placeholder reference tracking the current target endpoint
+let currentActionEndpoint = null;
+
+function handleScoutResponse(data) {
+    const confirmBox = document.getElementById('sync-confirm-box');
+    
+    // Check if the backend is requesting manual confirmation gate tracking
+    if (data.next === "manual_confirm") {
+        document.getElementById('confirm-main-text').textContent = data.message;
+        document.getElementById('confirm-sub-text').textContent = data.sub_message;
+        
+        // Save the dynamic target endpoint string safely in scope memory
+        currentActionEndpoint = data.action_endpoint;
+        
+        confirmBox.style.display = 'flex';
+
+        
+        // Wire up the click handler for the confirmation action button
+        const proceedBtn = document.getElementById('btn-proceed-sync');
+        proceedBtn.onclick = async () => {
+            await triggerManualIndexing(currentActionEndpoint);
+        };
+        return;
+    }
+    
+    // Hide the container box if it's a standard quick cache hit response
+    confirmBox.style.display = 'none';
+}
+
+function closeConfirmBox() {
+    document.getElementById('sync-confirm-box').style.display = 'none';
+    currentActionEndpoint = null;
+}
+
+async function triggerManualIndexing(endpointUrl) {
+    const proceedBtn = document.getElementById('btn-proceed-sync');
+    try {
+        // Update UI Button state feedback immediately to prevent double submissions
+        proceedBtn.disabled = true;
+        proceedBtn.textContent = "Launching Pipeline...";
+        proceedBtn.style.background = "#1f6feb"; 
+
+        const response = await fetch(`http://127.0.0.1:8000${endpointUrl}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include'
+        });
+
+        if (!response.ok) throw new Error("Index launch execution failed");
+
+        const result = await response.json();
+        console.log("Ingestion job successfully dispatched:", result);
+        
+        // Clear the alert component card layout frame and restart your repo tables poll loop
+        closeConfirmBox();
+
+        shouldPoll = true;      // <-- ADD
+
+        if (typeof fetchRepos === "function") {
+            fetchRepos(false);
+}
+
+    } catch (err) {
+        console.error("Manual profiling launch error encountered:", err);
+        alert("Failed to queue indexing job. Check server connection parameters.");
+    } finally {
+        // Reset interactive action button parameters back to standard baseline states
+        proceedBtn.disabled = false;
+        proceedBtn.textContent = "Proceed & Index";
+        proceedBtn.style.background = "#238636";
+    }
+}
+
 </script>
 </body>
 </html>
