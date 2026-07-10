@@ -153,7 +153,7 @@ class PreClonePipeline:
                     )
 
             # Staleness check for READY repos
-            if existing["index_status"] == RepoStatus.READY and not self.force_refresh:
+            if existing["index_status"] == RepoStatus.READY and not self.force_refresh :
                 stale = await check_staleness(existing, self.gh, self.installation_id, self.db_factory)
                 result.stale_check = stale
                 if not stale.is_stale:
@@ -210,10 +210,12 @@ class PreClonePipeline:
 
         # Set routing if not already set by staleness check
         if result.routing is None:
-            result.routing = (
-                RoutingDecision.REFRESH if existing
-                else RoutingDecision.NEW_INGESTION
-            )
+            if existing["index_status"] == RepoStatus.NOT_INDEXED:
+                result.routing = RoutingDecision.NEW_INGESTION
+            elif existing:
+                result.routing = RoutingDecision.REFRESH
+            else:
+                result.routing = RoutingDecision.NEW_INGESTION
 
         result.verdict = ValidationVerdict.APPROVED
         result.message = (
