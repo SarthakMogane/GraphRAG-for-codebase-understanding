@@ -42,7 +42,7 @@ class DatabaseJanitor:
                 UPDATE ingestion_jobs 
                 SET status = 'failed', 
                     updated_at = NOW()
-                WHERE status IN ('dispatch_pending', 'queued', 'processing')
+                WHERE status IN ('dispatch_pending', 'queued', 'running')
                   AND updated_at < NOW() - INTERVAL '1 hour'
                 """
             )
@@ -57,9 +57,9 @@ class DatabaseJanitor:
                 UPDATE repos 
                 SET index_status = 'failed', 
                     updated_at = NOW()
-                WHERE index_status IN ('pending', 'indexing')
+                WHERE index_status IN ('pending')  
                   AND updated_at < NOW() - INTERVAL '1 hour'
-                """
+                """          #update: indexing status and any other need to add inside index_status IN 
             )
             repos_cleared = int(repos_result.split(" ")[-1])
             
