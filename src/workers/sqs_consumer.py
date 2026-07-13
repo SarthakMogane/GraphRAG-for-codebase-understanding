@@ -1,5 +1,5 @@
 # app/workers/sqs_consumer.py
-import aioboto3, asyncio, json
+import aioboto3, asyncio, json ,signal
 from src.core.logger import get_logger
 from src.core.exceptions import TransientWebhookError
 from botocore.exceptions import ClientError
@@ -59,7 +59,7 @@ async def consume(queue_url: str, handler) -> None:
                 try:
                     if _shutdown_event.is_set():
                         break
-                    
+
                     resp = await sqs.receive_message(
                         QueueUrl=queue_url,
                         MaxNumberOfMessages=10,
@@ -69,49 +69,19 @@ async def consume(queue_url: str, handler) -> None:
                     messages = resp.get("Messages", [])
                     if not messages:
                         continue
-                        
-                    for msg in messages:
-                        receipt_handle = msg["ReceiptHandle"]
-                        
-                        try:
-                            # 2. Unpack the exact JSON structure we created in _enqueue_to_sqs
-                            body_dict = json.loads(msg["Body"])
-                            delivery_id = body_dict.get("delivery_id")
-                            event_type  = body_dict.get("event_type")
-                            payload     = body_dict.get("payload", {})
-                            
-                            # 3. Call our master wrapper
-                            await handler(delivery_id, event_type, payload)
-                            
-                            # 4. Success Path (Or Swallowed Poison Pill): Delete the message
-                            await sqs.delete_message(
-                                QueueUrl=queue_url,
-                                ReceiptHandle=receipt_handle
-                            )
-                            
-                        except TransientWebhookError as e:
-                            # 5. Temporary Failure: DO NOT DELETE. 
-                            # SQS visibility timeout will expire and it will be redelivered.
-                            logger.warning("Transient error for delivery %s. Will retry. Error: %s", delivery_id, e)
-                            continue 
-                            
-                        except Exception as e:
-                            # 6. Catastrophic JSON Parsing Failure:
-                            # If json.loads fails, the message is permanently broken. Delete it.
-                            logger.error("Permanently unparseable SQS message. Deleting. Error: %s", e)
-                            await sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
+
+                    tasks = [
+                        process_single_message(sqs, queue_url, msg, handler)
+                        for msg in messages
+                    ]
+                    await asyncio.gather(*tasks)
 
                 except ClientError as e:
-                    # If AWS networking goes down, don't crash the while loop.
-                    # Sleep for 5 seconds and try reconnecting.
                     logger.error("AWS SQS network error: %s", e)
-                    await asyncio.sleep(5)
-                    
-                except Exception as e:
-                    logger.critical("Unexpected consumer loop crash: %s", e)
                     await asyncio.sleep(5)
 
         finally:
+            logger.info("Closing database pools and exiting consumer.")
             await close_pools()
 
 if __name__ == "__main__":
@@ -127,10 +97,11 @@ if __name__ == "__main__":
     print(f"Settings Region: {settings.AWS_REGION}")
     print(f"queue link:{settings.SQS_WEBHOOK_QUEUE_URL}")
 
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda s=sig: _trigger_shutdown(s.name))
+
     try:
-        asyncio.run(consume(
-            queue_url=QUEUE_URL, 
-            handler=process_webhook_event
-        ))
-    except KeyboardInterrupt:
-        logger.info("Webhook worker shutting down gracefully via keyboard interrupt.")
+        loop.run_until_complete(consume(settings.SQS_WEBHOOK_QUEUE_URL, process_webhook_event))
+    except Exception as e:
+        logger.critical("Fatal crash: %s", e)
