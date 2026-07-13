@@ -55,8 +55,11 @@ async def consume(queue_url: str, handler) -> None:
     async with session.client("sqs") as sqs:
         logger.info("Started async SQS consumer loop for %s", queue_url)
         try: 
-            while True:
+            while not _shutdown_event.is_set():
                 try:
+                    if _shutdown_event.is_set():
+                        break
+                    
                     resp = await sqs.receive_message(
                         QueueUrl=queue_url,
                         MaxNumberOfMessages=10,
