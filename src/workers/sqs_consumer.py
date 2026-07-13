@@ -10,6 +10,34 @@ from src.core.database import create_pools , close_pools
 logger = get_logger(__name__)
 settings = get_settings()
 
+_shutdown_event = asyncio.Event()
+
+def _trigger_shutdown(sig_name):
+    logger.info("Received signal %s. Initiating graceful shutdown...", sig_name)
+    _shutdown_event.set()
+
+async def process_single_message(sqs, queue_url, msg, handler):
+    """Handles a single webhook message concurrently."""
+    receipt_handle = msg["ReceiptHandle"]
+    try:
+        body_dict = json.loads(msg["Body"])
+        delivery_id = body_dict.get("delivery_id")
+        
+        # Process the event (validating signatures, updating DB, etc.)
+        await handler(delivery_id, body_dict.get("event_type"), body_dict.get("payload", {}))
+        
+        # Success: Delete message
+        await sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
+        
+    except TransientWebhookError as e:
+        logger.warning("Transient error for delivery %s: %s. Leaving for redrive.", delivery_id, e)
+    except json.JSONDecodeError as e:
+        logger.error("Permanently unparseable JSON payload: %s. Deleting.", e)
+        await sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
+    except Exception as e:
+        logger.exception("Unexpected error processing webhook delivery %s", delivery_id)
+        # Fail safe: Do not delete, let it DLQ eventually
+
 async def consume(queue_url: str, handler) -> None:
     """
     Asynchronously polls SQS via long-polling and passes events to the handler.
@@ -17,7 +45,11 @@ async def consume(queue_url: str, handler) -> None:
     #boot the database pool
     await create_pools()
 
-    session = aioboto3.Session()
+    session = aioboto3.Session(
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=settings.AWS_REGION
+        )
     
     # 1. Open a true async connection to AWS
     async with session.client("sqs") as sqs:
@@ -77,12 +109,21 @@ async def consume(queue_url: str, handler) -> None:
                     await asyncio.sleep(5)
 
         finally:
-            close_pools()
+            await close_pools()
 
 if __name__ == "__main__":
     
     QUEUE_URL = settings.SQS_WEBHOOK_QUEUE_URL
-    
+    import os
+
+    # Temporary debug lines - remove these after fixing!
+    print("--- AWS CREDENTIAL CHECK ---")
+    print("--- PYDANTIC SETTINGS CHECK ---")
+    print(f"Settings Key ID: {settings.AWS_ACCESS_KEY_ID}")
+    print(f"Settings Secret: {settings.AWS_SECRET_ACCESS_KEY}")
+    print(f"Settings Region: {settings.AWS_REGION}")
+    print(f"queue link:{settings.SQS_WEBHOOK_QUEUE_URL}")
+
     try:
         asyncio.run(consume(
             queue_url=QUEUE_URL, 
