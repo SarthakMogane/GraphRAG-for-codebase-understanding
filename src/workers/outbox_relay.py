@@ -64,35 +64,36 @@ class MaintenanceWorker:
             # SKIP LOCKED guarantees no deadlocks if you boot 5 relay containers
             pending_jobs = await conn.fetch(
                 """
-                WITH unique_jobs AS (
-                    SELECT DISTINCT ON (ij.repo_id) 
-                        ij.id,
-                        ij.created_at
-                    FROM ingestion_jobs ij
-                    WHERE ij.status = 'dispatch_pending'
-                    ORDER BY ij.repo_id, ij.created_at ASC
-                    LIMIT 10
-                )
                 SELECT ij.id, ij.repo_id, ij.job_type, r.default_branch, r.size_kb,
-                    us.selected_subprojects, us.selected_submodules
+                       us.selected_subprojects, us.selected_submodules
                 FROM ingestion_jobs ij
-                JOIN unique_jobs uj ON uj.id = ij.id
                 JOIN repos r ON r.id = ij.repo_id
                 JOIN user_selections us ON us.id = ij.selection_id
-                ORDER BY uj.created_at ASC
-                FOR UPDATE SKIP LOCKED;
-
+                WHERE ij.status = 'dispatch_pending'
+                ORDER BY ij.created_at ASC
+                LIMIT 10
+                FOR UPDATE OF ij SKIP LOCKED;
                 """
             )
 
             if not pending_jobs:
                 return
 
+        # Instantly mark them as queued inside the DB and release the row locks
+            job_ids = [job["id"] for job in pending_jobs]
+            await conn.execute(
+                "UPDATE ingestion_jobs SET status = 'queued' WHERE id = ANY($1)", 
+                job_ids
+            )
+
             async with self.session.client('sqs') as sqs_client:
+                successful_job_ids = []
                 for job in pending_jobs:
+                    delivery_id = str(job["id"])
+                    group_id = str(job["repo_id"])
                     payload = {
-                        "repo_id": job["repo_id"],
-                        "job_id": job["id"],
+                        "repo_id": str(job["repo_id"]),
+                        "job_id": str(job["id"]),
                         "job_type": job["job_type"],
                         "selection_payload": {
                             "selected_subprojects": job["selected_subprojects"],
@@ -100,24 +101,39 @@ class MaintenanceWorker:
                         },
                         "validation_payload": {
                             "default_branch": job["default_branch"],
-                            "size_kb": job["repo_size_kb"] or 0,
+                            "size_kb": job["size_kb"] or 0,
                             "has_submodules": True,
                         }
                     }
 
-                    response = await sqs_client.send_message(
-                        QueueUrl=settings.SQS_INGESTION_QUEUE_URL,
-                        MessageBody=json.dumps(payload)
-                    )
+                    try:
+                        response = await sqs_client.send_message(
+                            QueueUrl=settings.SQS_INGESTION_QUEUE_URL,
+                            MessageBody=json.dumps(payload),
+                            MessageDeduplicationId=delivery_id,
+                            MessageGroupId=group_id,
                     
-                    await conn.execute(
-                        "UPDATE ingestion_jobs SET status = 'queued', sqs_message_id = $1 WHERE id = $2",
-                        response.get('MessageId'), job["id"]
-                    )
-                    logger.info(f"Dispatched Job {job['id']} to Ingestion Queue.")
+                        )
+                        
+                        sqs_message_id = response["MessageId"]   # for tracing/logs only
+                        logger.info(
+                            "Ingestion job enqueued: job_id=%s repo_id=%s sqs_message_id=%s",
+                            job["id"], job["repo_id"], sqs_message_id,
+                        )
+                        successful_job_ids.append(job["id"])
+                    
+                    except Exception as e:
+                    # If SQS network call fails, revert this single job back to pending so the next loop tries again
+                        logger.error("AWS SQS Error for job %s: %s", job['id'], e)
+                        
+            if successful_job_ids:
+                await conn.execute(
+                    "UPDATE ingestion_jobs SET status = 'queued' WHERE id = ANY($1)", 
+                    successful_job_ids
+                )
 
 async def main():
-    await close_pools()
+    await create_pools()
 
     try:
         worker = MaintenanceWorker()
