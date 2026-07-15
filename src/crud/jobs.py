@@ -25,7 +25,7 @@ async def _execute_queue_insertion_raw(
             repo_id
         )
 
-    if repo_state["index_status"] in ("pending", "indexing"):
+    if repo_state["index_status"] in ("pending", "filtering","submodules","manifesting"):
         raise HTTPException(
             status_code=409, 
             detail="An ingestion task is already queued or actively processing for this repository."
