@@ -20,18 +20,18 @@ Staleness sources:
 This module handles case #2 — the poll detection path.
 """
 
-import logging
+
 from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from src.core.logger import get_logger
 from src.models.database import IngestionJob, Repository, RepoStatus
 from src.services.pre_clone.types import StaleCheckResult
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def check_staleness(
@@ -133,31 +133,30 @@ async def check_already_processing(
     This prevents duplicate concurrent ingestion jobs for the same repo.
     """
 
-
-    active_job = await conn.fetchrow(
-            """
-             SELECT id,status
-             FROM ingestion_jobs
-             WHERE repo_id = $1
-                AND status IN ('queued','runing')
-            ORDER BY created_at DESC 
-            LIMIT 1
-            """,
-            repo[id]
-            
+    async with conn() as conn:
+        active_job = await conn.fetchrow(
+                """
+                SELECT id,status
+                FROM ingestion_jobs
+                WHERE repo_id = $1
+                    AND status IN ('queued','running')
+                ORDER BY created_at DESC 
+                LIMIT 1
+                """,
+                repo['id']
+                )
+        
+        if active_job:
+            logger.info(
+                "%s/%s already has an active job (id=%d, status=%s) — blocking re-queue",
+                repo["owner_login"], 
+                repo["repo_name"], 
+                active_job["id"], 
+                active_job["status"],
             )
-    
-    if active_job:
-        logger.info(
-            "%s/%s already has an active job (id=%d, status=%s) — blocking re-queue",
-            repo["owner_login"], 
-            repo["repo_name"], 
-            active_job["id"], 
-            active_job["status"],
-        )
-        return active_job["status"]
+            return active_job["status"]
 
-    return None
+        return None
 
 
 #---- helpers-----
