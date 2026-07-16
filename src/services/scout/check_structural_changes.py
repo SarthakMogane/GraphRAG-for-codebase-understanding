@@ -5,10 +5,12 @@
 import hashlib
 from typing import Optional
 from src.schemas.responses import IndexResponse
-from src.models.database import RepoStatus
+from src.models.database import RepoStatus 
 from src.services.github import GitHubService
 from src.core.logger import get_logger
 from src.core.config import get_settings
+from src.core.database import DbFactory
+
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -177,7 +179,8 @@ async def _handle_refresh(
     repo_id: int,
     result,
     installation_id: int,
-    conn,
+    db_factory:DbFactory,
+    _gh
 ) -> IndexResponse:
     """
     Handle a stale repo. Decides between:
@@ -187,15 +190,16 @@ async def _handle_refresh(
     stale = result.stale_check
  
     # ── Check if we have saved selections from last time ──────────────────────
-    saved_selection = await conn.fetchrow(
-        """
-            SELECT id, selected_subprojects, selected_submodules
-            FROM user_selections
-            WHERE repo_id = $1 
+    async with db_factory() as conn:
+        saved_selection = await conn.fetchrow(
+            """
+                SELECT id, selected_subprojects, selected_submodules
+                FROM user_selections
+                WHERE repo_id = $1 
 
-        """,
-        repo_id
-    )
+            """,
+            result.existing_repo_db_id
+        )
  
     # No saved selections → must go through scout regardless
     if not saved_selection:
@@ -207,8 +211,8 @@ async def _handle_refresh(
             repo_id=repo_id,
             next="scout",
             message=(
-                f"{repo.full_name} has new commits. "
-                f"Scanning structure before indexing."
+                f'{repo["full_name"]} has new commits.'
+                f'Scanning structure before indexing.'
             ),
         )
  
@@ -229,6 +233,7 @@ async def _handle_refresh(
             current_sha=current_sha,
             previous_sha=previous_sha,
             installation_id=installation_id,
+            _gh = _gh
         )
  
     # ── Structural change → re-scout with diff ────────────────────────────────
@@ -237,10 +242,11 @@ async def _handle_refresh(
             "%s has structural changes — routing to scout. diff=%s",
             repo["full_name"], ["structural_diff"],
         )
-        await conn.execute(
-            "UPDATE repos SET index_status = 'pending', updated_at = NOW() WHERE id = $1", 
-            repo_id
-        )
+        async with db_factory() as conn:
+            await conn.execute(
+                "UPDATE repos SET index_status = 'pending', updated_at = NOW() WHERE id = $1", 
+                result.existing_repo_db_id
+            )
         
         return IndexResponse(
             repo_id=repo_id,
@@ -267,10 +273,13 @@ async def _handle_refresh(
         return {
             "repo_id": repo_id,
             "next": "manual_confirm",
+            "action_type": "trigger_index",
+            "action_endpoint": f"/api/repos/{repo_id}/select/confirm",
             "message": (
                 f"{repo['full_name']} has {commit_count} new commit(s). "
                 f"Auto-sync is disabled. Do you want to proceed and consume tokens?"
             ),
+            "sub_message": "Do you want to proceed and run a manual structural re-index? (This will consume credits/tokens)."
         }
 
     # ── Code-only change → silent re-ingest ───────────────────────────
@@ -280,25 +289,26 @@ async def _handle_refresh(
         commit_count,
     )
     # ── OUTBOX PATTERN: Insert as 'dispatch_pending' ──────────────────────────
-    job_id = await conn.fetchval(
-        """
-        INSERT INTO ingestion_jobs (
-            repo_id, account_id, selection_id, job_type, 
-            status, trigger_sha_before, trigger_sha_after, stale_type
-        ) VALUES ($1, $2, $3, 'refresh', 'dispatch_pending', $4, $5, 'code_only')
-        RETURNING id
-        """,
-        repo_id, 
-        repo["account_id"], 
-        saved_selection["id"], 
-        previous_sha, 
-        current_sha
-    )
+    async with db_factory() as conn:
+        job_id = await conn.fetchval(
+            """
+            INSERT INTO ingestion_jobs (
+                repo_id, account_id, selection_id, job_type, 
+                status, trigger_sha_before, trigger_sha_after, stale_type
+            ) VALUES ($1, $2, $3, 'refresh', 'dispatch_pending', $4, $5, 'code_only')
+            RETURNING id
+            """,
+            result.existing_repo_db_id, 
+            repo["account_id"], 
+            saved_selection["id"], 
+            previous_sha, 
+            current_sha
+        )
 
-    await conn.execute(
-        "UPDATE repos SET index_status = 'pending', updated_at = NOW() WHERE id = $1", 
-        repo_id
-    )
+        await conn.execute(
+            "UPDATE repos SET index_status = 'pending', updated_at = NOW() WHERE id = $1", 
+            result.existing_repo_db_id
+        )
  
     commit_count = stale.commits_since_last_index if stale else 0
     return {
