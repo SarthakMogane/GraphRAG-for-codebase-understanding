@@ -174,7 +174,9 @@ async def apply_pipeline_result_to_db(
         new_status = "inaccessible"
     elif result.routing == RoutingDecision.SERVE_CACHE:
         new_status = "ready"
-    elif result.routing in [RoutingDecision.NEW_INGESTION, RoutingDecision.REFRESH]:
+    elif result.routing in RoutingDecision.REFRESH:
+        new_status = "stale"
+    elif result.routing in RoutingDecision.NEW_INGESTION:
         new_status = "pending"
 
     # ── 2. Execute the Database Update ─────────────────────────────────
