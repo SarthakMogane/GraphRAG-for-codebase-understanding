@@ -1,6 +1,6 @@
 # app/workers/job_consumer.py
 import asyncio
-import json
+import ijson
 import logging
 import sys
 import aioboto3
@@ -12,26 +12,41 @@ from src.workers.ingestion_worker import IngestionWorker, PermanentJobFailure, T
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-async def extend_visibility_heartbeat(sqs, queue_url: str, receipt_handle: str):
-    """
-    Background task that pings SQS to keep the message alive during heavy GraphRAG processing.
-    Pings every 3 minutes (180s) to grant an additional 5 minutes (300s) of visibility.
-    """
-    try:
-        while True:
-            await asyncio.sleep(180)
-            try:
-                await sqs.change_message_visibility(
-                    QueueUrl=queue_url,
-                    ReceiptHandle=receipt_handle,
-                    VisibilityTimeout=300
-                )
-                logger.info("Heartbeat success: Extended visibility timeout by 5 minutes.")
-            except ClientError as e:
-                logger.warning("Heartbeat failed to extend visibility: %s", e)
-    except asyncio.CancelledError:
-        # Task was cancelled successfully when the main job finished
-        logger.debug("Heartbeat task cancelled cleanly.")
+_shutdown_event = asyncio.Event()
+
+def _trigger_shutdown(sig_name):
+    logger.info("Received signal %s. Initiating graceful shutdown of Orchestrator...", sig_name)
+    _shutdown_event.set()
+
+class TrustedOrchestrator:
+    def __init__(self):
+        self.session = aioboto3.Session(
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region_name=settings.AWS_REGION
+        )
+        self.queue_url = settings.SQS_INGESTION_QUEUE_URL
+        
+    async def extend_visibility_heartbeat(sqs, queue_url: str, receipt_handle: str):
+        """
+        Background task that pings SQS to keep the message alive during heavy GraphRAG processing.
+        Pings every 3 minutes (180s) to grant an additional 5 minutes (300s) of visibility.
+        """
+        try:
+            while not _shutdown_event.is_set():
+                await asyncio.sleep(180)
+                try:
+                    await sqs.change_message_visibility(
+                        QueueUrl=queue_url,
+                        ReceiptHandle=receipt_handle,
+                        VisibilityTimeout=300
+                    )
+                    logger.info("Heartbeat success: Extended visibility timeout by 5 minutes.")
+                except ClientError as e:
+                    logger.warning("Heartbeat failed to extend visibility: %s", e)
+        except asyncio.CancelledError:
+            # Task was cancelled successfully when the main job finished
+            logger.debug("Heartbeat task cancelled cleanly.")
 
 
 async def run_ephemeral_job():
