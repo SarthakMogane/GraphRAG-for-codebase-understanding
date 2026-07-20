@@ -33,8 +33,8 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import struct
 from typing import Optional
-
 from src.core.config import get_settings
 from src.core.logger import get_logger
 
@@ -46,7 +46,7 @@ settings = get_settings()
 # Public interface — always use these two functions
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def encrypt_token(plaintext: str) -> bytes:
+async def encrypt_token(plaintext: str ,kms_client=None) -> bytes:
     """
     Encrypt a string token. Returns opaque bytes for DB storage.
     Uses KMS in production, Fernet in development.
@@ -60,7 +60,7 @@ async def encrypt_token(plaintext: str) -> bytes:
         return _fernet_encrypt(plaintext)
 
 
-async def decrypt_token(ciphertext: bytes) -> str:
+async def decrypt_token(ciphertext: bytes,kms_client=None) -> str:
     """
     Decrypt bytes from DB back to plaintext token string.
     Detects which backend was used from the stored format.
@@ -102,7 +102,7 @@ async def decrypt_token(ciphertext: bytes) -> str:
 # AWS KMS — Envelope Encryption
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _kms_encrypt(plaintext: str, kms_key_arn: str) -> bytes:
+async def _kms_encrypt(plaintext: str, kms_key_arn: str,kms_client = None) -> bytes:
     """
     Encrypt using AWS KMS envelope encryption.
 
@@ -124,22 +124,14 @@ async def _kms_encrypt(plaintext: str, kms_key_arn: str) -> bytes:
     import struct
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-    try:
-        import boto3
-        kms_client = boto3.client("kms", region_name=settings.AWS_REGION)
-
-        # Generate data key in thread pool (boto3 is sync)
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: kms_client.generate_data_key(
-                KeyId=kms_key_arn,
-                KeySpec="AES_256",
-            )
+    async def _do_encrypt(client) -> bytes:
+        response = await client.generate_data_key(
+            KeyId=kms_key_arn,
+            KeySpec="AES_256",
         )
 
         plaintext_key    = response["Plaintext"]        # 32 bytes
-        encrypted_key    = response["CiphertextBlob"]   # ~300 bytes, stored with ciphertext
+        encrypted_key    = response["CiphertextBlob"]   # ~300 bytes
 
         # Encrypt the token with AES-256-GCM
         iv = os.urandom(12)   # 96-bit nonce, unique per encryption
@@ -153,8 +145,8 @@ async def _kms_encrypt(plaintext: str, kms_key_arn: str) -> bytes:
         # Pack: version(1) + key_len(4) + encrypted_key + iv(12) + ciphertext+tag
         key_len = len(encrypted_key)
         packed = (
-            b"\x01"                           # version = KMS
-            + struct.pack(">I", key_len)      # 4-byte big-endian length
+            b"\x01"                                   
+            + struct.pack(">I", key_len)              
             + encrypted_key
             + iv
             + ciphertext_and_tag
@@ -162,35 +154,36 @@ async def _kms_encrypt(plaintext: str, kms_key_arn: str) -> bytes:
 
         return packed
 
+    try:
+        # If the Orchestrator passes in an open client, use it.
+        if kms_client:
+            return await _do_encrypt(kms_client)
+            
+        # Otherwise, spin up an ephemeral connection (slower, but backwards compatible)
+        else:
+            import aioboto3
+            session = aioboto3.Session(region_name=settings.AWS_REGION)
+            async with session.client("kms") as client:
+                return await _do_encrypt(client)
+                
     except Exception as e:
         logger.error("KMS encrypt failed: %s", e)
         raise RuntimeError(f"Token encryption failed: {e}") from e
 
 
-async def _kms_decrypt(ciphertext: bytes) -> str:
+async def _kms_decrypt(ciphertext: bytes, kms_client=None) -> str:
     """Decrypt KMS envelope-encrypted bytes back to string."""
-    import asyncio
-    import struct
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-    try:
-        import boto3
-
+    async def _do_decrypt(client) -> str:
         # Unpack stored format
-        # Skip version byte (index 0)
         key_len = struct.unpack(">I", ciphertext[1:5])[0]
         encrypted_key      = ciphertext[5 : 5 + key_len]
         iv                 = ciphertext[5 + key_len : 5 + key_len + 12]
         ciphertext_and_tag = ciphertext[5 + key_len + 12:]
 
-        kms_client = boto3.client("kms", region_name=settings.AWS_REGION)
-
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: kms_client.decrypt(CiphertextBlob=encrypted_key)
-        )
-
+        # Request KMS to decrypt our Data Key
+        response = await client.decrypt(CiphertextBlob=encrypted_key)
         plaintext_key = response["Plaintext"]
 
         aesgcm  = AESGCM(plaintext_key)
@@ -202,6 +195,15 @@ async def _kms_decrypt(ciphertext: bytes) -> str:
 
         return plaintext.decode("utf-8")
 
+    try:
+        if kms_client:
+            return await _do_decrypt(kms_client)
+        else:
+            import aioboto3
+            session = aioboto3.Session(region_name=settings.AWS_REGION)
+            async with session.client("kms") as client:
+                return await _do_decrypt(client)
+                
     except Exception as e:
         logger.error("KMS decrypt failed: %s", e)
         raise RuntimeError(f"Token decryption failed: {e}") from e
