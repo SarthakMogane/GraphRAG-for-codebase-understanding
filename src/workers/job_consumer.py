@@ -248,7 +248,27 @@ class TrustedOrchestrator:
         )
         return len(batch)
     
-
+     # ─────────────────────────────────────────────────────────────────────────
+    # Terminal state writes
+    # ─────────────────────────────────────────────────────────────────────────
+ 
+    async def _mark_job_completed(self, job_id: UUID, repo_id: UUID, files_total: int) -> None:
+        async with get_system_transaction() as conn:
+            await conn.execute(
+                "UPDATE ingestion_jobs SET status='completed', completed_at=NOW(), files_total=$2 WHERE id=$1",
+                str(job_id), files_total,
+            )
+            await conn.execute(
+                "UPDATE repos SET index_status='ready', last_indexed_at=NOW() WHERE id=$1",
+                str(repo_id),
+            )
+ 
+    async def _mark_job_failed(self, job_id: UUID, repo_id: UUID, error: str) -> None:
+        async with get_system_transaction() as conn:
+            await conn.execute(
+                "UPDATE ingestion_jobs SET status='failed', completed_at=NOW(), error_message=$2, phase='FAILED' WHERE id=$1",
+                str(job_id), error[:2000],
+            )
 
 
     async def consume_forever(self):
