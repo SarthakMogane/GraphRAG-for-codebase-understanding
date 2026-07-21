@@ -64,7 +64,7 @@ class MaintenanceWorker:
             # SKIP LOCKED guarantees no deadlocks if you boot 5 relay containers
             pending_jobs = await conn.fetch(
                 """
-                SELECT ij.id, ij.repo_id, ij.job_type, r.default_branch, r.size_kb,
+                SELECT ij.id, ij.repo_id, ij.account_id, ij.job_type,r.repo_name, r.owner_login, r.default_branch, r.size_kb,
                        us.selected_subprojects, us.selected_submodules
                 FROM ingestion_jobs ij
                 JOIN repos r ON r.id = ij.repo_id
@@ -93,6 +93,9 @@ class MaintenanceWorker:
                     group_id = str(job["repo_id"])
                     payload = {
                         "repo_id": str(job["repo_id"]),
+                        "account_id": str(job["account_id"]),
+                        "repo_name": str(job["repo_name"]),
+                        "owner":str(job["owner_name"]),
                         "job_id": str(job["id"]),
                         "job_type": job["job_type"],
                         "selection_payload": {
