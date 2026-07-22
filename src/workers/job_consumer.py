@@ -185,7 +185,6 @@ class TrustedOrchestrator:
         # ─────────────────────────────────────────────────────────────────────────
     # Streaming the sandbox's output into Postgres + Neo4j
     # ─────────────────────────────────────────────────────────────────────────
- 
     async def _stream_output_and_record(
         self, s3_client, s3_key: str, job_id: UUID, repo_id: UUID,
     ) -> tuple[list[dict], int]:
@@ -225,28 +224,9 @@ class TrustedOrchestrator:
             )
  
         return manifest_rows, total_nodes
+    
 
-    async def _write_node_batch(self, batch: list[dict]) -> int:
-        """
-        MERGE, not CREATE — idempotent under re-index. Matches on the
-        stable identity (repo_id, file_path, symbol_name), so re-running
-        this for the same repo updates existing nodes instead of
-        duplicating them. repo_id is enforced non-null by a Neo4j
-        constraint created once at deploy time (see setup notes) — the
-        graph-store equivalent of a Postgres RLS account_id filter.
-        """
-        from src.services.graph_writer import get_neo4j_driver   # new file, see below
- 
-        driver = await get_neo4j_driver()
-        await driver.execute_query(
-            """
-            UNWIND $batch AS node
-            MERGE (n:ASTNode {repo_id: node.repo_id, file_path: node.file_path, symbol_name: node.symbol_name})
-            SET n += node
-            """,
-            batch=batch,
-        )
-        return len(batch)
+
     
      # ─────────────────────────────────────────────────────────────────────────
     # Terminal state writes
