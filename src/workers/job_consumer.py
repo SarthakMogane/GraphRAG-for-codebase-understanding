@@ -313,6 +313,58 @@ class TrustedOrchestrator:
                 logger.info("Draining active jobs and closing database pools.")
                 await close_pools()
 
+
+    async def _fan_out_to_ai_queue(self, sqs, nodes: list[dict], tenant_id: str, repo_id: UUID):
+        """
+        Filters high-value AST nodes and batches them into the SQS AI Enrichment Queue.
+        Utilizes asyncio.gather to bypass the SQS 10-message batch limit without blocking.
+        """
+        # 1. Filter: Only send structural concepts to the LLM to save money and time
+        ai_target_types = {"function_definition", "class_definition", "method_definition"}
+        enrichment_candidates = [n for n in nodes if n.get("type") in ai_target_types]
+
+        if not enrichment_candidates:
+            return
+
+        sqs_batches = []
+        current_batch = []
+
+        # 2. Chunk into AWS-mandated 10-message batches
+        for idx, node in enumerate(enrichment_candidates):
+            current_batch.append({
+                'Id': str(idx), # AWS requires a unique ID per message within a batch
+                'MessageBody': json.dumps({
+                    "tenant_id": str(tenant_id),
+                    "repo_id": str(repo_id),
+                    "file_path": node["file_path"],
+                    "symbol_name": node["symbol_name"],
+                    "node_type": node["type"]
+                })
+            })
+            
+            if len(current_batch) == 10:
+                sqs_batches.append(current_batch)
+                current_batch = []
+                
+        if current_batch:
+            sqs_batches.append(current_batch)
+
+        # 3. Fire all HTTP requests to AWS SQS concurrently
+        # If we have 100 batches, this executes them in parallel rather than waiting sequentially
+        tasks = [
+            sqs.send_message_batch(
+                QueueUrl=settings.SQS_ENRICHMENT_QUEUE_URL,
+                Entries=batch
+            )
+            for batch in sqs_batches
+        ]
+        
+        try:
+            await asyncio.gather(*tasks)
+            logger.debug("Successfully fanned out %d micro-tasks to AI Queue", len(enrichment_candidates))
+        except ClientError as e:
+            logger.error("Failed to fan-out enrichment batch to SQS: %s", e)
+            # In a strict environment, you might raise here to fail the job and retry
 # ─────────────────────────────────────────────────────────────────────────────
 # NDJSON async iterator helper
 # ─────────────────────────────────────────────────────────────────────────────
