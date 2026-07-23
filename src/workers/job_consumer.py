@@ -155,7 +155,7 @@ class TrustedOrchestrator:
 
             # 6. TRUSTED ZONE: Stream S3 JSON into Neo4j (Memory Safe)
             await self.update_job_status(job_id, phase="INJECTING_GRAPH")
-            manifest_rows, ast_nodes_written =await self.stream_s3_to_graph(s3_client, s3_key,job_id, repo_id)
+            manifest_rows, ast_nodes_written =await self._stream_output_and_record(sqs,s3_client, s3_key,job_id, repo_id , tenant_id)
 
             # 7. Cleanup & Completion
             await self.update_job_status(job_id, phase="COMPLETED", node_count=ast_nodes_written)
@@ -186,7 +186,7 @@ class TrustedOrchestrator:
     # Streaming the sandbox's output into Postgres + Neo4j
     # ─────────────────────────────────────────────────────────────────────────
     async def _stream_output_and_record(
-        self, s3_client, s3_key: str, job_id: UUID, repo_id: UUID,
+        self,sqs, s3_client, s3_key: str, job_id: UUID, repo_id: UUID,tenant_id:UUID
     ) -> tuple[list[dict], int]:
         """
         Streams the sandbox's NDJSON output (file manifest rows +
@@ -211,17 +211,30 @@ class TrustedOrchestrator:
                 node = item["data"]
                 node["repo_id"] = str(repo_id)   # enforced on every node, see §5
                 node_buffer.append(node)
+                # When buffer hits 1000, write to DB, then Fan-Out to AI
                 if len(node_buffer) >= 1000:
-                    total_nodes += await self._write_node_batch(node_buffer)
+                    # 1. Guarantee data is in Neo4j FIRST
+                    await self._write_node_batch(node_buffer)
+                    
+                    # 2. Fan-out to AI workers concurrently
+                    await self._fan_out_to_ai_queue(sqs, node_buffer, tenant_id, repo_id)
+                    
+                    total_nodes += len(node_buffer)
                     node_buffer.clear()
  
+        # Flush the remainder of the file
         if node_buffer:
-            total_nodes += await self._write_node_batch(node_buffer)
+            await self._write_node_batch(node_buffer)
+            await self._fan_out_to_ai_queue(sqs, node_buffer, tenant_id, repo_id)
+            total_nodes += len(node_buffer)
  
         if manifest_rows:
-            await self.manifest_writer._write_manifest_rows_raw(
-                repo_id=repo_id, job_id=job_id, rows=manifest_rows,
-            )
+            async with get_system_transaction() as conn:
+                for row in manifest_rows:
+                    await conn.execute(
+                        "INSERT INTO repo_files (repo_id, file_path, file_hash) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                        str(repo_id), row["file_path"], row.get("file_hash", "")
+                    )
  
         return manifest_rows, total_nodes
     
