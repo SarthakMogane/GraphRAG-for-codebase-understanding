@@ -1,0 +1,3 @@
+# Sandbox dependencies (fastapi, uvicorn, etc.)
+pandas
+
