@@ -1,0 +1,20 @@
+#  Heavy container layout that locks down user execution
+
+ # Start from the clean, native AWS micro-kernel operating system baseline
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023
+
+# Establish a temporary workspace inside the base container build context
+WORKDIR /build
+
+# 3. Install core Python 3.11 runtimes and deployment dependencies smoothly
+RUN dnf install -y python3.11 python3.11-pip tar gzip && \
+    dnf clean all
+
+# 4. Standard secure wrapper update for your pip tooling engine
+RUN python3.11 -m pip install --upgrade pip
+
+# Copy your local requirements.txt straight into the heavy container compiler
+COPY requirements.txt .
+
+# Pre-bake every single one of your massive GraphRAG libraries straight into ECR
+RUN python3.11 -m pip install --no-cache-dir -r requirements.txt
