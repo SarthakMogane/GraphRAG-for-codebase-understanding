@@ -1,5 +1,5 @@
 import aws_cdk as cdk
-from aws_cdk import aws_ecr as ecr, aws_s3 as s3
+from aws_cdk import aws_ecr as ecr, aws_s3 as s3 ,aws_iam as iam
 from constructs import Construct
 
 class StorageConstruct(Construct):
@@ -24,4 +24,18 @@ class StorageConstruct(Construct):
             repository_name=f"graphrag-sandbox-base-{env_modifier}", # Added modifier to avoid name clashes
             removal_policy=cdk.RemovalPolicy.DESTROY,
             image_scan_on_push=True,
+        )
+
+        # ⚡ CRUCIAL PRODUCTION FIX: Grant AWS MicroVM Builder service explicit ECR access
+        self.base_ecr_repo.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="AllowMicroVMImageBuilderPull",
+                effect=iam.Effect.ALLOW,
+                principals=[iam.ServicePrincipal("lambda.amazonaws.com")],
+                actions=[
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:BatchGetImage"
+                ]
+            )
         )
