@@ -20,7 +20,7 @@ class SecurityConstruct(Construct):
             self,
             "MicroVMBuildRole",
             role_name=f"MicroVMBuildRole-{env_modifier}",
-            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"), 
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"), 
         )
 
         # Wire up Least Privilege Actions
