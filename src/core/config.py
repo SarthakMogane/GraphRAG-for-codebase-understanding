@@ -25,9 +25,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
 
-
     #fronted URL :
-    # Local Development
     FRONTEND_URL:str
 
 # When you deploy, you'll change it to:
@@ -40,7 +38,6 @@ class Settings(BaseSettings):
     GITHUB_APP_SLUG:str         # PEM key as string (newlines as \n)
     # GITHUB_APP_INSTALLATION_ID: int
     GITHUB_WEBHOOK_SECRET: str           # For validating incoming webhook payloads
-
     # Per-token rate limits: 5000 req/hr for authenticated, 60 for anonymous
     GITHUB_API_RATE_LIMIT_BUFFER: int = 200   # Stop at N calls remaining
 
@@ -49,36 +46,39 @@ class Settings(BaseSettings):
     PYTHON_DATABASE_URL: str
     DB_POOL_MIN_SIZE: int = 20
     DB_POOL_MAX_SIZE: int = 10
-
     DATABASE_READ_URL:str
     DB_READ_POOL_MIN_SIZE:int =20
     DB_READ_POOL_MAX_SIZE:int = 10
 
     RDS_CA_BUNDLE_PATH:str
 
-    # crypto 
+     # ── Security & Crypto ────────────────────────────────────────────
     LOCAL_ENCRYPTION_KEY:str
     KMS_KEY_ARN_TOKENS: str
+
+    # ── AWS & Queue Architecture ─────────────────────────────────────
+    # Consolidating global credentials
     AWS_ACCESS_KEY_ID:str
     AWS_SECRET_ACCESS_KEY:str
     AWS_REGION:str= "eu-north-1" 
-    APP_ENV:str
 
     #sqs
     SQS_WEBHOOK_QUEUE_URL:str
     SQS_INGESTION_QUEUE_URL:str
-
-    # App Settings
-        # ── Redis (Celery broker + result backend) ───────────────────────
-    REDIS_URL: str = "redis://localhost:6379/0"
-    CELERY_RESULT_EXPIRES: int = 86400   # 24 hours in seconds
-
+    
     # ── Object Storage (S3-compatible / GCS) ─────────────────────────
     STORAGE_BUCKET: str                  # Bucket for file corpus storage
     STORAGE_ENDPOINT_URL: Optional[str] = None   # None = AWS S3; set for GCS/MinIO
-    AWS_ACCESS_KEY_ID: Optional[str] = None
-    AWS_SECRET_ACCESS_KEY: Optional[str] = None
 
+    #_____Sandbox____________
+    SANDBOX_MICROVM_IMAGE_ARN = str
+    MICROVM_EGRESS_CONNECTOR_NAME=list(str)
+    MICROVM_INGRESS_CONNECTOR_NAME=list(str)
+    MICROVM_EXECUTION_ROLE_ARN=str
+    IMAGE_VERSION=str
+    EGRESS_NETWORK_CONNECTORS=list(str)
+    INGRESS_NETWORK_CONNECTORS=list(str)
+    MAXIMUM_DURATION_SECONDS=int
     # ── Clone / Ingestion Limits ──────────────────────────────────────
     # These constants encode all the thresholds discussed in the architecture
     CLONE_WORK_DIR: str = "/tmp/ingestion_clones"
@@ -105,10 +105,6 @@ class Settings(BaseSettings):
     # Commit history sampling depth
     COMMIT_HISTORY_SAMPLE_SIZE: int = 100
 
-    # ── Celery Queue Names ────────────────────────────────────────────
-    QUEUE_INGESTION: str = "ingestion"
-    QUEUE_SUBMODULE: str = "submodule"
-    QUEUE_WEBHOOK: str = "webhook"
 
     @field_validator("GITHUB_APP_PRIVATE_KEY")
     @classmethod
