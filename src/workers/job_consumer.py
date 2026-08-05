@@ -73,7 +73,7 @@ class TrustedOrchestrator:
             )
         return status in ("completed", "failed")
 
-    async def process_single_tenant_job(self, sqs, msg ,kms_client , s3_client , lambda_client):
+    async def process_single_tenant_job(self, sqs, msg ,kms_client , s3_client , microvm):
         """
         Orchestrates one job end to end. Runs concurrently alongside
         other jobs' invocations of this same method — safe because this
@@ -86,8 +86,7 @@ class TrustedOrchestrator:
         
         job_id = body["job_id"]
         repo_id = body["repo_id"]
-        tenant_id = body["account_id"]
-        repo_url = body["repo_url"]  #update : need to add repo url in sqs first . 
+        tenant_id = body["account_id"] 
         owner = body["owner"] 
         repo = body["repo_name"]
         s3_key = f"staging/{tenant_id}/{job_id}_ast.json"
@@ -117,44 +116,36 @@ class TrustedOrchestrator:
                 ExpiresIn=1800 # 30 minutes
             )
 
-            await self._update_job_status(job_id, phase="CLONING_REPO")
+            await self.update_job_status(job_id, phase="CLONING_REPO")
             logger.info(
                 "Invoking sandbox for job=%s owner=%s repo=%s (tenant=%s)",
                 job_id, owner, repo, tenant_id,
             )
             # 4. UNTRUSTED ZONE: Invoke Sandbox via Secure Response Streaming
-            logger.info("Invoking MicroVM Sandbox for Job %s (Tenant: %s)", job_id, tenant_id)
-            response = await lambda_client.invoke_with_response_stream(
-                FunctionName=settings.PARSER_LAMBDA_NAME,
-                TenantId=str(tenant_id),  # CRITICAL: AWS Hardware Tenant Isolation Routing
-                Payload=json.dumps({
+            microvm_id, endpoint = await self.microvm.launch(
+                image_identifier=settings.SANDBOX_MICROVM_IMAGE_ARN,
+                run_hook_payload={
                     "job_id":        str(job_id),
+                    "account_id":    str(tenant_id),
                     "owner":         owner,
                     "repo":          repo,
                     "branch":        body.get("branch", "main"),
                     "sparse_dirs":   body.get("selected_subprojects", []),
                     "submodules":    body.get("selected_submodules", []),
-                    "github_token":  github_token,
-                    "presigned_s3_url": presigned_s3_url
-                }).encode('utf-8')
+                    "github_token":  github_token,   # never logged — see redaction note in sandbox_app/app.py
+                    "presigned_url": presigned_s3_url,
+                    "image_version": str(settings.IMAGE_VERSION),
+                },
+                egress_connector_name=settings.MICROVM_EGRESS_CONNECTOR_NAME,
+                ingress_connector_name = settings.MICROVM_INGRESS_CONNECTOR_NAME,
+                execution_role_arn=settings.MICROVM_EXECUTION_ROLE_ARN,
+                imgae_version=settings.IMAGE_VERSION,
+                maximum_duration_seconds=settings.MAXIMUM_DURATION_SECONDS,
             )
 
-            # 5. Consume Real-Time Sandbox Execution Updates
-            async for event in response['EventStream']:
-                if 'PayloadChunk' in event:
-                    # The MicroVM yielded a status update (e.g., {"phase": "CLONING"})
-                    chunk = json.loads(event['PayloadChunk']['Payload'].decode('utf-8'))
-                    await self.update_job_status(job_id, phase=chunk.get("phase", "PROCESSING"))
-                    
-                if 'InvokeComplete' in event:
-                    complete_data = event['InvokeComplete']
-                    if 'ErrorCode' in complete_data:
-                        raise RuntimeError(
-                            f"Sandbox error: {complete_data.get('ErrorDetails')}"
-                        )
 
             # 6. TRUSTED ZONE: Stream S3 JSON into Neo4j (Memory Safe)
-            await self.update_job_status(job_id, phase="INJECTING_GRAPH")
+            await self.update_job_status(job_id, phase="RECORDING_MANIFEST")
             manifest_rows, ast_nodes_written =await self._stream_output_and_record(sqs,s3_client, s3_key,job_id, repo_id , tenant_id)
 
             # 7. Cleanup & Completion
