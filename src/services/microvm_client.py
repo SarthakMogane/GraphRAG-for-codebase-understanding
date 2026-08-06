@@ -133,4 +133,24 @@ class MicroVMClient:
                 raise MicroVMError(f"create-microvm-auth-token failed: {e}") from e
         return resp["authToken"]["X-aws-proxy-auth"]
 
-    
+# Terminate — errors here are logged, never raised
+# ─────────────────────────────────────────────────────────────────────────
+ 
+    async def terminate(self, microvm_id: str) -> None:
+        """
+        Deliberately swallows errors rather than raising — termination
+        failing shouldn't fail an otherwise-successful job, and the
+        idle-policy backstop (maxIdleDurationSeconds=60, set in launch())
+        reclaims the instance shortly regardless.
+        """
+        async with self._session.client("lambda-microvms", region_name=settings.AWS_REGION) as client:
+            try:
+                await client.terminate_microvm(microvmIdentifier=microvm_id)
+                logger.info("MicroVM terminated: id=%s", microvm_id)
+            except ClientError as e:
+                err = _classify(e)
+                logger.error(
+                    "Failed to terminate MicroVM id=%s: %s (code=%s) — "
+                    "idle-policy will reclaim it within 60s regardless",
+                    microvm_id, err, err.code,
+                ) 
