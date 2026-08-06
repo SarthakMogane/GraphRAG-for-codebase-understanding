@@ -31,7 +31,7 @@ import json
 import logging
 from typing import AsyncIterator, Optional
 from uuid import UUID
-
+from dataclasses import dataclass
 import aioboto3
 import httpx
 
@@ -41,6 +41,14 @@ from src.core.logger import get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
+@dataclass
+class LaunchResult:
+    microvm_id = str
+    endpoint = str
+    start = int
+    end = int
+    state = str
+    state_reason = str
 
 class MicroVMError(Exception):
     """Raised on any unrecoverable MicroVM lifecycle or communication error."""
@@ -113,9 +121,9 @@ class MicroVMClient:
         end = resp["terminatedAt"]
         state = resp["state"]
         state_reason = resp["stateReason"]
-        endpoint = resp["endpoint"]
+        
         logger.info("MicroVM launched: id=%s endpoint=%s", microvm_id, endpoint)
-        return microvm_id, endpoint,start , end , state , state_reason # doo commit here for refactor(job_consumer) if we do want to save start , end in db . 
+        return LaunchResult(microvm_id, endpoint, start , end , state , state_reason)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Auth token for talking to the running instance
