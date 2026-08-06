@@ -109,7 +109,28 @@ class MicroVMClient:
 
         microvm_id = resp["microvmId"]
         endpoint = resp["endpoint"]
+        start = resp["startedAt"]
+        end = resp["terminatedAt"]
+        state = resp["state"]
+        state_reason = resp["stateReason"]
+        endpoint = resp["endpoint"]
         logger.info("MicroVM launched: id=%s endpoint=%s", microvm_id, endpoint)
-        return microvm_id, endpoint
+        return microvm_id, endpoint,start , end , state , state_reason # doo commit here for refactor(job_consumer) if we do want to save start , end in db . 
 
-   
+    # ─────────────────────────────────────────────────────────────────────────
+    # Auth token for talking to the running instance
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def create_auth_token(self, microvm_id: str,expire:int) -> str:
+        async with self._session.client("lambda-microvms", region_name=settings.AWS_REGION) as client:
+            try:
+                resp = await client.create_microvm_auth_token(
+                    microvmIdentifier=microvm_id,
+                    allowedPorts=[{"allPorts": {}}],
+                    expirationInMinutes=expire
+                )
+            except Exception as e:
+                raise MicroVMError(f"create-microvm-auth-token failed: {e}") from e
+        return resp["authToken"]["X-aws-proxy-auth"]
+
+    
