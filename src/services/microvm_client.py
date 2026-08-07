@@ -152,7 +152,7 @@ class MicroVMClient:
         execution_role_arn: str,
         image_version:str,
         maximum_duration_seconds: int = 900,
-    ) -> tuple[str, str]:
+    ) -> LaunchResult
         """
         Launch a fresh MicroVM from the given image. Returns (microvm_id, endpoint).
 
@@ -168,6 +168,20 @@ class MicroVMClient:
         rather than relying on suspend/resume semantics, since each job is
         one-shot batch work, not an interactive session worth preserving.
         """
+
+        payload_json = json.dumps(run_hook_payload)
+        if len(payload_json.encode()) > 16_000:
+            # Fail fast with a clear, specific message rather than letting
+            # AWS's RequestEntityTooLargeException surface as an opaque
+            # 413 — this is a code-level bug (we're pushing too much into
+            # the payload), not something a retry or a platform issue fixes.
+            raise MicroVMError(
+                f"run_hook_payload is {len(payload_json)} bytes, "
+                f"exceeds the 16KB limit ",
+                code="PayloadTooLarge",
+                retryable=False,
+            )
+ 
         async with self._session.client("lambda-microvms", region_name=settings.AWS_REGION) as client:
             try:
                 resp = await client.run_microvm(
