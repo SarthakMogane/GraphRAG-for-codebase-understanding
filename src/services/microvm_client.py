@@ -33,13 +33,49 @@ from typing import AsyncIterator, Optional
 from uuid import UUID
 from dataclasses import dataclass
 import aioboto3
+from botocore.exceptions import ClientError
 import httpx
-
+from tenacity import (
+    retry,
+    wait_exponential,
+    retry_if_exception,
+    stop_after_attempt
+)
 from src.core.config import get_settings
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
 settings = get_settings()
+
+# Error taxonomy — every code from CommonErrors.html, classified once
+# ─────────────────────────────────────────────────────────────────────────────
+ 
+# Transient — retrying the same request may succeed.
+_RETRYABLE_CODES = {
+    "InternalFailure",          # 500 — AWS-side issue, try again later
+    "ServiceUnavailable",       # 503 — temporary, try again later
+    "RequestTimeoutException",  # 408 — server didn't receive request in time
+    "ThrottlingException",      # 400 — rate limited; SDK auto-retries some
+                                 # of this already, but we add a layer too
+                                 # since default retry config isn't guaranteed
+}
+ 
+# Permanent — retrying the identical request will fail identically.
+# Each needs either a config fix (IAM policy, credentials) or a code fix
+# (payload too large, malformed request) — never a blind retry.
+_PERMANENT_CODES = {
+    "AccessDeniedException",           # IAM policy missing the action
+    "ExpiredTokenException",           # credentials need refreshing, not retry
+    "IncompleteSignature",             # SDK/signing bug
+    "MalformedHttpRequestException",   # our request body is wrong
+    "NotAuthorized",
+    "OptInRequired",                   # account not enrolled in the service
+    "RequestEntityTooLargeException",  # runHookPayload exceeds the 16KB limit
+    "RequestAbortedException",         # we closed the connection ourselves
+    "UnknownOperationException",       # calling an action that doesn't exist
+    "UnrecognizedClientException",     # bad credentials
+    "ValidationError",                 # bad parameter shape/value
+}
 
 @dataclass
 class LaunchResult:
@@ -51,9 +87,46 @@ class LaunchResult:
     state_reason = str
 
 class MicroVMError(Exception):
-    """Raised on any unrecoverable MicroVM lifecycle or communication error."""
-    pass
+    """
+    Raised on any MicroVM lifecycle or communication failure.
+    .retryable tells the caller whether this is worth retrying at the
+    job level (TransientJobFailure) or not (PermanentJobFailure) —
+    mirrors the classification already established in ingestion_worker.py.
+    """
+    def __init__(self,message:str ,code:str = "unknown",retryable:bool = False):
+        super().__init__(message)
+        self.code = code 
+        self.retryable = retryable
 
+def _classify(exc:ClientError) -> MicroVMError:
+    """
+    Raised on any MicroVM lifecycle or communication failure.
+    .retryable tells the caller whether this is worth retrying at the
+    job level (TransientJobFailure) or not (PermanentJobFailure) —
+    mirrors the classification already established in ingestion_worker.py.
+    """
+     
+    code = exc.response.get("Error",{}).get("Code","Unknown")
+    message = exc.response.get("Error",{}).get("Message",str(exc))
+    retryable = code in _RETRYABLE_CODES
+
+    if code not in _RETRYABLE_CODES and code not in _PERMANENT_CODES:
+        logger.warning("Unrecognized MicroVM error code: %s — treating as permanent", code)
+
+    return MicroVMError(f"{code}: {message}", code=code, retryable=retryable)
+
+def _should_retry(exc:BaseException) -> bool:
+    if isinstance(exc,ClientError):
+        code  = exc.response.get("Error",{}).get("Code","Unknown")
+        return code in _RETRYABLE_CODES
+    return isinstance(exc,(httpx.TimeoutException , httpx.ConnectError))
+
+_retry_transient = retry(
+    stop=stop_after_attempt,
+    wait=wait_exponential,
+    retry=retry_if_exception(_should_retry),
+    reraise=True
+)                   
 
 class MicroVMClient:
     """
@@ -69,13 +142,13 @@ class MicroVMClient:
     # ─────────────────────────────────────────────────────────────────────────
     # Launch
     # ─────────────────────────────────────────────────────────────────────────
-
+    @_retry_transient
     async def launch(
         self,
         image_identifier: str,
         run_hook_payload: dict,
-        egress_connector_name: str,
-        ingress_connector_name:str,
+        egress_connector_name: list[str],
+        ingress_connector_name:list[str],
         execution_role_arn: str,
         image_version:str,
         maximum_duration_seconds: int = 900,
@@ -112,8 +185,8 @@ class MicroVMClient:
                     ingressNetworkConnectors=[ingress_connector_name],
                     
                 )
-            except Exception as e:
-                raise MicroVMError(f"run-microvm failed: {e}") from e
+            except ClientError as e:
+                raise _classify(e) from e
 
         microvm_id = resp["microvmId"]
         endpoint = resp["endpoint"]
@@ -128,7 +201,7 @@ class MicroVMClient:
     # ─────────────────────────────────────────────────────────────────────────
     # Auth token for talking to the running instance
     # ─────────────────────────────────────────────────────────────────────────
-
+    @_retry_transient
     async def create_auth_token(self, microvm_id: str,expire:int) -> str:
         async with self._session.client("lambda-microvms", region_name=settings.AWS_REGION) as client:
             try:
@@ -137,13 +210,13 @@ class MicroVMClient:
                     allowedPorts=[{"allPorts": {}}],
                     expirationInMinutes=expire
                 )
-            except Exception as e:
-                raise MicroVMError(f"create-microvm-auth-token failed: {e}") from e
+            except ClientError as e:
+                raise _classify(e) from e
         return resp["authToken"]["X-aws-proxy-auth"]
 
 # Terminate — errors here are logged, never raised
 # ─────────────────────────────────────────────────────────────────────────
- 
+    
     async def terminate(self, microvm_id: str) -> None:
         """
         Deliberately swallows errors rather than raising — termination
