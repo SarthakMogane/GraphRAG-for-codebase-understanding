@@ -152,7 +152,7 @@ class MicroVMClient:
         execution_role_arn: str,
         image_version:str,
         maximum_duration_seconds: int = 900,
-    ) -> LaunchResult
+    ) -> LaunchResult:
         """
         Launch a fresh MicroVM from the given image. Returns (microvm_id, endpoint).
 
@@ -249,3 +249,45 @@ class MicroVMClient:
                     "idle-policy will reclaim it within 60s regardless",
                     microvm_id, err, err.code,
                 ) 
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Status stream 
+    # ─────────────────────────────────────────────────────────────────────────
+ 
+    async def stream_status(
+        self,
+        endpoint: str,
+        auth_token: str,
+        timeout_seconds: int = 600,
+    ) -> AsyncIterator[dict]:
+        url = f"https://{endpoint}/status"
+        headers = {"X-aws-proxy-auth": auth_token}
+ 
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=timeout_seconds)) as client:
+            try:
+                async with client.stream("GET", url, headers=headers) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        payload = json.loads(line[len("data:"):].strip())
+                        yield payload
+                        if payload.get("phase") in ("COMPLETED", "FAILED"):
+                            return
+            except httpx.TimeoutException as e:
+                # Retryable in principle (network blip), but at the job
+                # level a hung sandbox after several minutes is treated
+                # as permanent by job_consumer — retrying the exact same
+                # job against a fresh MicroVM is what "Retry" on the
+                # dashboard does, not an automatic SQS redrive.
+                raise MicroVMError(
+                    f"Status stream timed out after {timeout_seconds}s",
+                    code="StatusStreamTimeout",
+                    retryable=False,
+                ) from e
+            except httpx.HTTPStatusError as e:
+                raise MicroVMError(
+                    f"Status stream HTTP error: {e.response.status_code}",
+                    code=f"HTTP{e.response.status_code}",
+                    retryable=e.response.status_code in (502, 503, 504),
+                ) from e
