@@ -12,6 +12,9 @@ from src.core.database import get_system_transaction,create_pools , close_pools
 from src.core.config import get_settings
 from src.core.crypto import decrypt_token
 from src.workers.ingestion_worker import IngestionWorker, PermanentJobFailure, TransientJobFailure
+from src.services.microvm_client import MicroVMClient
+from src.services.github import GitHubService
+from src.workers.utils.callback import _active_background_tasks,handle_task_completion
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -28,8 +31,11 @@ class TrustedOrchestrator:
             aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
             aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
             region_name=settings.AWS_REGION
-        )
-        self.queue_url = settings.SQS_INGESTION_QUEUE_URL
+            
+        ),
+        self.gh = GitHubService(),
+        self.queue_url = settings.SQS_INGESTION_QUEUE_URL,
+        self.microvm = MicroVMClient(self.session)
 
     async def extend_visibility_heartbeat(self, sqs, queue_url: str, receipt_handle: str):
         """
@@ -122,7 +128,7 @@ class TrustedOrchestrator:
                 job_id, owner, repo, tenant_id,
             )
             # 4. UNTRUSTED ZONE: Invoke Sandbox via Secure Response Streaming
-            microvm_id, endpoint = await self.microvm.launch(
+            microvm_id, endpoint,_= await self.microvm.launch(
                 image_identifier=settings.SANDBOX_MICROVM_IMAGE_ARN,
                 run_hook_payload={
                     "job_id":        str(job_id),
@@ -143,6 +149,7 @@ class TrustedOrchestrator:
                 maximum_duration_seconds=settings.MAXIMUM_DURATION_SECONDS,
             )
 
+            
 
             # 6. TRUSTED ZONE: Stream S3 JSON into Neo4j (Memory Safe)
             await self.update_job_status(job_id, phase="RECORDING_MANIFEST")
@@ -280,12 +287,22 @@ class TrustedOrchestrator:
         await create_pools()
         logger.info("Starting Highly-Concurrent ECS Trusted Orchestrator...")
 
+        # Configure your thread pool sizes for your sync boto3 clients
+        loop = asyncio.get_running_loop()
+        from concurrent.futures import ThreadPoolExecutor
+
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=30))
+
         async with self.session.client("sqs") as sqs,\
                    self.session.client("kms") as kms, \
                    self.session.client("s3") as s3, \
                    self.session.client("lambda") as lambda_client:
+
             try:
                 while not _shutdown_event.is_set():
+                    if len(_active_background_tasks) >= 50:
+                        await asyncio.sleep(1)
+                        continue
                     try:
                         # Pull up to 10 jobs at once (adjust based on ECS instance size)
                         resp = await sqs.receive_message(
@@ -299,15 +316,24 @@ class TrustedOrchestrator:
                             continue
                             
                         # Execute all pulled jobs concurrently
-                        tasks = [
-                            self.process_single_tenant_job(sqs, msg, kms,s3, lambda_client)
-                            for msg in messages 
-                        ]
-                        results = await asyncio.gather(*tasks,return_exceptions=True)
+                        for msg in messages:
+                            body = json.loads(msg["Body"])
+                            job_id = body.get("job_id")
 
-                        for r in results:
-                            if isinstance(r, Exception):
-                                logger.error("Unexpected task-level exception: %s", r)
+                            # 1. Spawn the background task
+                            task = asyncio.create_task(
+                                self.process_single_tenant_job(sqs, msg, kms, s3)
+                            )
+
+                            # 2. CRITICAL STEP: Attach metadata dynamically to the Task instance object
+                            # This prevents the task from being anonymous inside the Done-Callback!
+                            setattr(task, "job_id", job_id)
+
+                            # 3. Add to memory protection set
+                            _active_background_tasks.add(task)
+
+                            # 4. Attach your final production-ready helper callback
+                            task.add_done_callback(handle_task_completion)
 
                     except ClientError as e:
                         logger.error("AWS SQS network error: %s", e)
