@@ -88,4 +88,13 @@ async def validate_hook():
         logger.error("Validate hook failed: %s", e)
         return JSONResponse(status_code=503, content={"status": "not_ready", "error": str(e)})
 
+@app.post("/aws/lambda-microvms/runtime/v1/suspend")
+async def suspend_hook():
+    "Not used for now"
+    return JSONResponse(status_code=200 , content={"status":"ok"})
+
+@app.post("/aws/lambda-microvms/runtime/v1/resume")
+async def resume_hook():
+    "Not used for now"
+    return JSONResponse(status_code=200 ,content={"status":"ok"})
 
