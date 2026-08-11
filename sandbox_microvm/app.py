@@ -54,7 +54,10 @@ logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 
 _job_state:dict ={
-    "job_id":None
+    "job_id":None,
+    "phase":"BOOTED",
+    "error":None,
+    "time":None,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -116,5 +119,32 @@ async def terminate_hook():
             shutil.rmtree(workspace_root,ignore_errors=True)
 
     return JSONResponse(status_code=200 , content={"status":"cleand up!"})
-    pass
 
+
+@app.post("aws/lambda-microvms/runtime/v1/run")
+async def run_hook(request:Request):
+    """
+    Called once per run-microvm launch. Receives {microvmId, runHookPayload}.
+    Returns 200 immediately after kicking off the real work as a
+    background task — the orchestrator's SSE poll (below) is how it
+    actually learns about progress, not this hook's response.
+    """
+    body = request.json()
+    payload = json.loads(body.get("runHookPayload","{}"))
+
+    _job_state.update(
+        {
+            "job_id":payload.get("job_id"),
+            "phase":"STARTED",
+            "error": None,
+            "started_at":time.time(),
+        }
+    )
+
+    asyncio.create_task(_run_job_with_timeout(payload))
+
+    return JSONResponse(status_code=200 , content={"status":"Ok"})
+
+
+async def _run_job_with_timeout(payload:dict)->None:
+    pass
