@@ -53,7 +53,9 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
 
-
+_job_state:dict ={
+    "job_id":None
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Image build hooks (only called during create-microvm-image / update)
@@ -97,4 +99,22 @@ async def suspend_hook():
 async def resume_hook():
     "Not used for now"
     return JSONResponse(status_code=200 ,content={"status":"ok"})
+
+@app.post("/aws/lambda-microvms/runtime/v1/terminate")
+async def terminate_hook():
+    """
+    Called by Lambda right before releasing resources — fires whether
+    termination was explicit (our normal path) or a fallback (idle-policy
+    backstop). Belt-and-suspenders cleanup in case _run_job's own
+    JobWorkspace teardown didn't run for some reason (e.g. the process
+    was killed mid-job rather than completing normally).
+    """
+    job_id = _job_state.get("job_id")
+    if job_id:
+        workspace_root = Path(f"/tmp/ingestion/job-{job_id}")
+        if workspace_root.exists():
+            shutil.rmtree(workspace_root,ignore_errors=True)
+
+    return JSONResponse(status_code=200 , content={"status":"cleand up!"})
+    pass
 
