@@ -59,6 +59,7 @@ _job_state:dict ={
     "error":None,
     "time":None,
 }
+JOB_TIMEOUT_SECONDS = 3600
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Image build hooks (only called during create-microvm-image / update)
@@ -147,4 +148,34 @@ async def run_hook(request:Request):
 
 
 async def _run_job_with_timeout(payload:dict)->None:
-    pass
+    """
+    Bounds total job duration at the application level, tighter than the
+    platform's own maximum_duration_seconds. Without this, a hung job
+    (real or stub) would occupy — and bill for — a MicroVM for up to
+    8 hours before the platform's own ceiling kicks in.
+    """
+    try:
+        await asyncio.wait_for(_run_job(payload),timeout=JOB_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.error("Job %s exceeded %ds -marking FAILED",payload.get("job_id"),JOB_TIMEOUT_SECONDS)
+        _job_state["error"]=f"Job exceded {JOB_TIMEOUT_SECONDS}s timeout"
+        _job_state["phase"]="FAILED"
+
+async def _run_job(payload:dict):
+    "main job"
+
+    job_id        = payload["job_id"]
+    account_id    = payload["account_id"]   # fixed — was hardcoded "sandbox"
+    owner         = payload["owner"]
+    repo          = payload["repo"]
+    branch        = payload.get("branch", "main")
+    sparse_dirs   = payload.get("sparse_dirs", [])
+    submodules    = payload.get("submodules", [])
+    github_token  = payload["github_token"]
+    presigned_url = payload["presigned_url"]
+    image_version = payload["image_version"]
+
+    try:
+        pass 
+    except:
+        pass
