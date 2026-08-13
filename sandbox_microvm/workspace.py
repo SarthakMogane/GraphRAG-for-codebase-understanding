@@ -13,6 +13,16 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_WORKSPACE_BYTE = 2 * 1024 * 1024 * 1024  #2GB
 
+class WorkspacePathViolation(Exception):
+    """
+    Raised when code (ours or, indirectly, a malicious repo via a
+    crafted symlink) attempts to touch a path outside the workspace root.
+    This is the runtime enforcement of "block writes outside workspace" —
+    it does not trust git's own path handling, since CVE-2025-48384 is
+    exactly git's own path validation failing.
+    """
+    pass
+
 class JobWorkspace:
     """
     single workspace for each tenant
@@ -84,3 +94,46 @@ class JobWorkspace:
 
     #path containment— the actual enforcement of "no writes outside workspace"
 
+    def path_for(self,subdir:str , *parts:str)-> Path:
+        """
+        Return a path inside the workspace, validated to stay inside it.
+        Use this instead of building paths manually anywhere a filename
+        might originate from repo content (file paths from git, submodule
+        names, etc.) — those are attacker-controlled strings.
+        """
+        candidate = self._root.joinpath(subdir,*parts)
+        return self._validate_contained(candidate)
+
+    def _validate_contained(self, candidate:Path) -> Path:
+        """
+        Resolve the candidate path (following symlinks) and confirm the
+        resolved path is still inside the workspace root. This is the
+        direct runtime check for CVE-2025-48384-style attacks: even if a
+        malicious repo's crafted submodule path or symlink tries to point
+        outside the tree, resolution here catches it before any write
+        happens, rather than trusting git's own (sometimes buggy) path
+        validation.
+        """
+        resolved_root = self._root.resolve()
+        try:
+            resolved_candidate = candidate.resolve()
+        except (OSError,RuntimeError) as e:
+            raise WorkspacePathViolation(
+                f"Couldn't resolve path {candidate}:{e}"
+            ) from e
+
+        if not self._is_relative_to(resolved_candidate, resolved_root):
+            raise WorkspacePathViolation(
+                f"Path escape workspace:{resolved_candidate}"
+                f"is not under {resolved_root} (job = {self.job_id})"
+            )
+
+        return resolved_candidate
+
+    @staticmethod
+    def _is_relative_to(path:Path , root:Path) -> bool:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
