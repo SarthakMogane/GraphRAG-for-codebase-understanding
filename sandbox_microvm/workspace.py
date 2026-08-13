@@ -23,6 +23,10 @@ class WorkspacePathViolation(Exception):
     """
     pass
 
+class WorkspaceQuotaExceeded(Exception):
+    """Raised when a job's workspace would exceed its disk quota."""
+    pass 
+
 class JobWorkspace:
     """
     single workspace for each tenant
@@ -137,3 +141,50 @@ class JobWorkspace:
             return True
         except ValueError:
             return False
+
+    #Disk Quota enforcement
+    def current_size_bytes(self)->int:
+        """
+        Total size of everything written so far in this workspace.
+        Called periodically during clone/filter — not just once at the
+        end — so a decompression-bomb-style attack (a repo that expands
+        to gigabytes from a small clone) is caught mid-operation, not
+        after it has already exhausted disk.
+        """
+        total = 0 
+        for dirpath, _dirname,filenames in os.walk(self._root):
+            for name in filenames:
+                fp = os.path.join(dirpath,name)
+                try:
+                    if not os.path.islink(fp):
+                        total += os.path.getsize(fp)
+                except OSError:
+                    continue
+        return total
+
+    def enforce_quota(self) ->None:
+        """
+        Raise WorkspaceQuotaExceeded if the workspace has grown past
+        max_bytes. Call this at natural checkpoints (after clone, after
+        each submodule init, periodically during file filtering).
+        """
+        size = self.current_size_bytes()
+        if size > self.max_byte:
+            raise WorkspaceQuotaExceeded(
+                f"Workspace for job={self.job_id} reached {size} bytes "
+                f"(limit {self.max_bytes}) — aborting to protect the "
+                f"task's disk."
+            )
+
+    # Convenience accessors  
+    @property
+    def clone_dir(self) -> Path:
+        return self._root/"clone"
+
+    @property
+    def manifest_dir(self) -> Path:
+        return self._root/"manifest"
+
+    @property
+    def tmp_dir(self) -> Path:
+        return self._root/"tmp" 
