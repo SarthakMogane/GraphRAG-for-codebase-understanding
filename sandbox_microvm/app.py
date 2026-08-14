@@ -47,6 +47,7 @@ from typing import Optional
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from sandbox_microvm.workspace import JobWorkspace
 
 logger = logging.getLogger("sandbox_app")
 logging.basicConfig(level=logging.INFO)
@@ -176,6 +177,7 @@ async def _run_job(payload:dict):
     image_version = payload["image_version"]
 
     try:
-        pass 
+        async with JobWorkspace(job_id=job_id,account_id=account_id,base_dir="/temp/ingestion") as ws:
+            home_dir = ws.tmp_dir/"home"
     except:
         pass
