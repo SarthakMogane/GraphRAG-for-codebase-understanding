@@ -117,4 +117,20 @@ class CloneStrategySelector:
             skip_lfs=metadata.uses_git_lfs,
             estimated_disk_mb=estimate_monorepo_size
         )
+
+    def estimate_monorepo_disk_mb(metadata_size_kb: int, sparse_dirs: list[str]) -> int:
+        total_repo_mb = metadata_size_kb // 1024
         
+        # Base overhead for .git tree data (blobless clone takes ~5-15% of total repo size)
+        git_tree_overhead_mb = int(total_repo_mb * 0.10)
+        
+        # Each directory adds marginal disk weight, but with diminishing additions (logarithmic)
+        # Assumes average directory coverage ratio capped at 80% of total repo
+        num_dirs = len(sparse_dirs)
+        coverage_ratio = min(0.80, num_dirs * 0.08) 
+        
+        estimated_content_mb = int(total_repo_mb * coverage_ratio)
+        
+        # Ensure minimum sandbox buffer of 50MB, but never exceed total repo size
+        estimated_total = git_tree_overhead_mb + estimated_content_mb
+        return max(50, min(estimated_total, total_repo_mb))
