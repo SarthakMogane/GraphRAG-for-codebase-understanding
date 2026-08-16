@@ -97,5 +97,24 @@ class CloneStrategySelector:
             estimated_disk_mb=50,      # Minimal until sparse checkout expands
         )
 
-    
+    def _monorepo_strategy(
+            self,
+            metadata:RepoMetadata,
+            sparse_dirs:list[str]
+    ) -> CloneConfig:
+        """
+        Monorepo: partial clone + sparse checkout in cone mode.
+        Only the approved sub-project directories are materialized.
+        """
+        estimate_monorepo_size = self.estimate_monorepo_disk_mb(metadata.size_kb,sparse_dirs)
+        return CloneConfig(
+            strategy=CloneStrategy.SPARSE_CHECKOUT,
+            depth=1,
+            single_branch=True,
+            filter_blob_none=True,
+            no_checkout=True,
+            sparse_dirs=sparse_dirs,
+            skip_lfs=metadata.uses_git_lfs,
+            estimated_disk_mb=estimate_monorepo_size
+        )
         
