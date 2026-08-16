@@ -45,5 +45,57 @@ class CloneStrategySelector:
         "Clone strategy selected for %s/%s: strategy=%s size_kb=%d",
         metadata.owner, metadata.name, strategy.strategy.value, size_kb
         )
-        
+
         return strategy
+
+    def _small_repo_strategy(self, metadata:RepoMetadata) -> CloneConfig:
+        """
+        < 50MB: Simple shallow clone.
+        Everything lands on disk; filter pipeline handles the rest.
+        LFS skip only if LFS is detected (avoid downloading model weights, etc.)
+        """
+        return CloneConfig(
+            strategy=CloneStrategy.SHALLOW,
+            depth=1,
+            single_branch=True,
+            filter_blob_none=False,
+            skip_lfs=metadata.uses_git_lfs,
+            estimated_disk_mb=metadata.size_kb//1024
+        )
+
+    def _medium_repo_strategy(self, metadata:RepoMetadata) -> CloneConfig:
+        """
+        50MB-500MB: Partial clone with blob filtering.
+        Tree structure and file metadata arrive immediately.
+        File content is fetched lazily — only for files that pass the filter pipeline.
+        Binary assets filtered by Phase 5 are never downloaded at all.
+        """
+
+        return CloneConfig(
+            strategy=CloneStrategy.PARTIAL_BLOB,
+            depth=1,
+            single_branch=True,
+            filter_blob_none=True,
+            skip_lfs=metadata.uses_git_lfs,
+            estimated_disk_mb=metadata.size_kb//2048
+        )
+
+    def _large_repo_strategy(self, metada:RepoMetadata) -> CloneConfig:
+        """
+         > 500MB: Partial clone + sparse checkout.
+        Nothing lands on disk until specifically requested.
+        sparse_dirs will be populated by MonorepoDetector separately.
+        """
+
+        return CloneConfig(
+            strategy=CloneStrategy.PARTIAL_BLOB,   # Upgraded to sparse in execute phase
+            depth=1,
+            single_branch=True,
+            filter_blob_none=True,
+            no_checkout=True,          # --no-checkout: tree on disk but no files
+            skip_lfs=True,
+            estimated_disk_mb=50,      # Minimal until sparse checkout expands
+        )
+
+    
+        
