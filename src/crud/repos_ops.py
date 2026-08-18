@@ -194,8 +194,9 @@ async def apply_pipeline_result_to_db(
                         primary_language = COALESCE($4, primary_language),
                         size_kb = COALESCE($5, size_kb),
                         is_fork = COALESCE($6, is_fork),
+                        using_git_lfs = COALESCE($7,using_git_lfs)
                         updated_at = NOW()
-                    WHERE github_repo_id = $7
+                    WHERE github_repo_id = $8
                     """,
                     new_status,
                     result.github_id,
@@ -203,6 +204,7 @@ async def apply_pipeline_result_to_db(
                     result.primary_language,
                     result.size_kb,
                     result.fork_info.is_fork if result.fork_info else None,
+                    result.uses_git_lfs,
                     repo_id
                 )
         else:
