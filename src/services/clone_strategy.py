@@ -1,10 +1,21 @@
 from core.logger import get_logger
 from dataclasses import dataclass,field
-from typing import Optional
+from typing import Optional , Union
 from src.models.database import CloneStrategy
 from src.services.github import RepoMetadata
 from sandbox_microvm.models import CloneSettings
 logger = get_logger(__name__)
+
+@dataclass
+class RepoSizingInfo:
+    """
+    The subset of RepoMetadata that select() actually uses — confirmed
+    by checking every strategy branch's field access, nothing more.
+    """
+    size_kb: int
+    owner: str
+    name: str
+    uses_git_lfs: bool = False
 
 @dataclass
 class CloneConfig:
@@ -21,11 +32,13 @@ class CloneConfig:
 class CloneStrategySelector:
     def __init__(self,settings: CloneSettings):
         self.settings = settings
+
     def select(
         self,
-        metadata:RepoMetadata,
+        metadata: Union[RepoMetadata,RepoSizingInfo],
         is_monorepo:bool = False,
         sparse_dir:Optional[list[str]] = None,
+        total_subprojects_detected :int = 0,
     ) -> CloneConfig:
 
         "select Strategy for cloning the repo based on args"
@@ -33,7 +46,7 @@ class CloneStrategySelector:
         size_kb = metadata.size_kb
 
         if is_monorepo:
-            strategy = self._monorepo_strategy(metadata,sparse_dir)
+            strategy = self._monorepo_strategy(metadata,sparse_dir,total_subprojects_detected)
         elif size_kb <= self.settings.REPO_SIZE_SMALL_KB:
             strategy = self._small_repo_strategy(metadata)
         elif size_kb <= self.settings.REPO_SIZE_MEDIUM_KB:
@@ -42,8 +55,8 @@ class CloneStrategySelector:
             strategy = self._large_repo_strategy(metadata)
 
         logger.info(
-        "Clone strategy selected for %s/%s: strategy=%s size_kb=%d",
-        metadata.owner, metadata.name, strategy.strategy.value, size_kb
+        "Clone strategy selected for %s/%s: strategy=%s size_kb=%d skip_lfs=%s",
+        metadata.owner, metadata.name, strategy.strategy.value, size_kb,strategy.skip_lfs
         )
 
         return strategy
@@ -80,7 +93,7 @@ class CloneStrategySelector:
             estimated_disk_mb=metadata.size_kb//2048
         )
 
-    def _large_repo_strategy(self, metada:RepoMetadata) -> CloneConfig:
+    def _large_repo_strategy(self, metadata:RepoMetadata) -> CloneConfig:
         """
          > 500MB: Partial clone + sparse checkout.
         Nothing lands on disk until specifically requested.
@@ -99,14 +112,15 @@ class CloneStrategySelector:
 
     def _monorepo_strategy(
             self,
-            metadata:RepoMetadata,
-            sparse_dirs:list[str]
+            metadata:Union[RepoMetadata,RepoSizingInfo],
+            sparse_dirs:list[str],
+            total_subprojects_detected:int = 0,
     ) -> CloneConfig:
         """
         Monorepo: partial clone + sparse checkout in cone mode.
         Only the approved sub-project directories are materialized.
         """
-        estimate_monorepo_size = self.estimate_monorepo_disk_mb(metadata.size_kb,sparse_dirs)
+        estimate_monorepo_size = self.estimate_monorepo_disk_mb(metadata.size_kb,sparse_dirs,total_subprojects_detected)
         return CloneConfig(
             strategy=CloneStrategy.SPARSE_CHECKOUT,
             depth=1,
@@ -118,19 +132,8 @@ class CloneStrategySelector:
             estimated_disk_mb=estimate_monorepo_size
         )
 
-    def estimate_monorepo_disk_mb(metadata_size_kb: int, sparse_dirs: list[str]) -> int:
-        total_repo_mb = metadata_size_kb // 1024
-        
-        # Base overhead for .git tree data (blobless clone takes ~5-15% of total repo size)
-        git_tree_overhead_mb = int(total_repo_mb * 0.10)
-        
-        # Each directory adds marginal disk weight, but with diminishing additions (logarithmic)
-        # Assumes average directory coverage ratio capped at 80% of total repo
-        num_dirs = len(sparse_dirs)
-        coverage_ratio = min(0.80, num_dirs * 0.08) 
-        
-        estimated_content_mb = int(total_repo_mb * coverage_ratio)
-        
-        # Ensure minimum sandbox buffer of 50MB, but never exceed total repo size
-        estimated_total = git_tree_overhead_mb + estimated_content_mb
-        return max(50, min(estimated_total, total_repo_mb))
+    def estimate_monorepo_disk_mb(metadata_size_kb: int, sparse_dirs: list[str],total_subprojects_detected:int) -> int:
+        denominator = max(total_subprojects_detected, len(sparse_dirs), 1)
+
+        size = (metadata_size_kb*len(sparse_dirs))/ (1024 * denominator)
+        return size
