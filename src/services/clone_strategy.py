@@ -3,8 +3,11 @@ from dataclasses import dataclass,field
 from typing import Optional , Union
 from src.models.database import CloneStrategy
 from src.services.github import RepoMetadata
-from sandbox_microvm.models import CloneSettings
+from src.core.config import get_settings
+from src.core.logger import get_logger
+
 logger = get_logger(__name__)
+settings = get_settings()
 
 @dataclass
 class RepoSizingInfo:
@@ -30,8 +33,10 @@ class CloneConfig:
     estimated_disk_mb:int = 0 
 
 class CloneStrategySelector:
-    def __init__(self,settings: CloneSettings):
-        self.settings = settings
+    """
+    Takes repo metadata, returns a CloneConfig.
+    Easy to unit test.
+    """
 
     def select(
         self,
@@ -47,9 +52,9 @@ class CloneStrategySelector:
 
         if is_monorepo:
             strategy = self._monorepo_strategy(metadata,sparse_dir,total_subprojects_detected)
-        elif size_kb <= self.settings.REPO_SIZE_SMALL_KB:
+        elif size_kb <= settings.REPO_SIZE_SMALL_KB:
             strategy = self._small_repo_strategy(metadata)
-        elif size_kb <= self.settings.REPO_SIZE_MEDIUM_KB:
+        elif size_kb <= settings.REPO_SIZE_MEDIUM_KB:
             strategy = self._medium_repo_strategy(metadata)
         else:
             strategy = self._large_repo_strategy(metadata)
@@ -83,14 +88,14 @@ class CloneStrategySelector:
         File content is fetched lazily — only for files that pass the filter pipeline.
         Binary assets filtered by Phase 5 are never downloaded at all.
         """
-
+        retention = settings.CLONE_MEDIUM_SIZE_RETENTION_PERCENT
         return CloneConfig(
             strategy=CloneStrategy.PARTIAL_BLOB,
             depth=1,
             single_branch=True,
             filter_blob_none=True,
             skip_lfs=metadata.uses_git_lfs,
-            estimated_disk_mb=metadata.size_kb//2048
+            estimated_disk_mb=(metadata.size_kb*retention)//(1048*100)
         )
 
     def _large_repo_strategy(self, metadata:RepoMetadata) -> CloneConfig:
@@ -107,7 +112,7 @@ class CloneStrategySelector:
             filter_blob_none=True,
             no_checkout=True,          # --no-checkout: tree on disk but no files
             skip_lfs=True,
-            estimated_disk_mb=50,      # Minimal until sparse checkout expands
+            estimated_disk_mb=settings.CLONE_LARGE_REPO_SKELETON_MB,      # Minimal until sparse checkout expands
         )
 
     def _monorepo_strategy(
