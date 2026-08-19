@@ -48,7 +48,6 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sandbox_microvm.workspace import JobWorkspace
-from src.services.clone_strategy import CloneStrategySelector
 from src.services.github import RepoMetadata
 
 logger = logging.getLogger("sandbox_app")
@@ -182,12 +181,5 @@ async def _run_job(payload:dict):
         async with JobWorkspace(job_id=job_id,account_id=account_id,base_dir="/temp/ingestion") as ws:
             home_dir = ws.tmp_dir/"home"
 
-            metadata:RepoMetadata
-            selector = CloneStrategySelector()
-            configs = selector.select(
-                metadata = metadata,
-                is_monorepo=bool(sparse_dirs),
-                sparse_dir=sparse_dirs or None,
-            )
     except:
         pass
