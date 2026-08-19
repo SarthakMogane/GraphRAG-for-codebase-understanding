@@ -71,17 +71,19 @@ class Settings(BaseSettings):
     STORAGE_ENDPOINT_URL: Optional[str] = None   # None = AWS S3; set for GCS/MinIO
 
     #_____Sandbox____________
-    SANDBOX_MICROVM_IMAGE_ARN = str
-    MICROVM_EGRESS_CONNECTOR_NAME=list(str)
-    MICROVM_INGRESS_CONNECTOR_NAME=list(str)
-    MICROVM_EXECUTION_ROLE_ARN=str
-    IMAGE_VERSION=str
-    EGRESS_NETWORK_CONNECTORS=list(str)
-    INGRESS_NETWORK_CONNECTORS=list(str)
-    MAXIMUM_DURATION_SECONDS=int
+    SANDBOX_MICROVM_IMAGE_ARN : str
+    MICROVM_EGRESS_CONNECTOR_NAME:list[str]
+    MICROVM_INGRESS_CONNECTOR_NAME:list[str]
+    MICROVM_EXECUTION_ROLE_ARN:str
+    IMAGE_VERSION:str
+    EGRESS_NETWORK_CONNECTORS:list[str]
+    INGRESS_NETWORK_CONNECTORS:list[str]
+    MAXIMUM_DURATION_SECONDS:int
+    EXPIRE_MICROVM_AUTH_TOKEN:int
     # ── Clone / Ingestion Limits ──────────────────────────────────────
     # These constants encode all the thresholds discussed in the architecture
     CLONE_WORK_DIR: str = "/tmp/ingestion_clones"
+    CLONE_SANITY_REJECT_MB: list[str]
 
     # Repository size thresholds (GitHub reports in KB)
     REPO_SIZE_SMALL_KB: int = 51_200        # < 50MB  → full shallow clone
