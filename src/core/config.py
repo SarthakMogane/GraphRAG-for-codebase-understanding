@@ -82,7 +82,6 @@ class Settings(BaseSettings):
     EXPIRE_MICROVM_AUTH_TOKEN:int
     # ── Clone / Ingestion Limits ──────────────────────────────────────
     # These constants encode all the thresholds discussed in the architecture
-    CLONE_WORK_DIR: str = "/tmp/ingestion_clones"
     CLONE_SANITY_REJECT_MB: list[str]
 
     # Repository size thresholds (GitHub reports in KB)
