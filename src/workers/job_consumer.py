@@ -15,6 +15,7 @@ from src.workers.ingestion_worker import IngestionWorker, PermanentJobFailure, T
 from src.services.microvm_client import MicroVMClient
 from src.services.github import GitHubService
 from src.workers.utils.callback import _active_background_tasks,handle_task_completion
+from src.services.clone_strategy import CloneStrategySelector , RepoSizingInfo , CloneConfig
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -36,6 +37,7 @@ class TrustedOrchestrator:
         self.gh = GitHubService(),
         self.queue_url = settings.SQS_INGESTION_QUEUE_URL,
         self.microvm = MicroVMClient(self.session)
+        self.strategy_selector = CloneStrategySelector()
 
     async def extend_visibility_heartbeat(self, sqs, queue_url: str, receipt_handle: str):
         """
@@ -79,6 +81,59 @@ class TrustedOrchestrator:
             )
         return status in ("completed", "failed")
 
+     # Clone strategy decision — trusted zone, pure logic (see clone_strategy.py)
+    # ─────────────────────────────────────────────────────────────────────────
+ 
+    async def _decide_clone_strategy(
+        self, repo_id: int, owner: str, repo: str, body: dict,
+    ) -> "CloneConfig":
+        """
+        Fetches what's already persisted in Postgres — no redundant
+        GitHub API call — and calls CloneStrategySelector.select().
+        """
+ 
+        async with get_system_transaction() as conn:
+            repo_row = await conn.fetchrow(
+                "SELECT repo_size_kb, uses_git_lfs FROM repositories WHERE id = $1",
+                repo_id,
+            )
+            scout_row = await conn.fetchrow(
+                """
+                SELECT scout_json FROM repo_scout_results
+                WHERE repo_id = $1
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                repo_id,
+            )
+ 
+        if not repo_row:
+            raise RuntimeError(f"Repo {repo_id} not found — cannot decide clone strategy")
+ 
+        sizing = RepoSizingInfo(
+            size_kb=repo_row["repo_size_kb"] or 0,
+            owner=owner,
+            name=repo,
+            # Nullable — pre-migration-006 rows haven't had this
+            # populated yet. Safe default: assume no LFS rather than
+            # silently skipping content the repo actually needs.
+            uses_git_lfs=repo_row["uses_git_lfs"] or False,
+        )
+ 
+        is_monorepo = False
+        total_subprojects_detected = 0
+        if scout_row and scout_row["scout_json"]:
+            scout_data = scout_row["scout_json"]
+            is_monorepo = scout_data.get("is_monorepo", False)
+            total_subprojects_detected = len(scout_data.get("subprojects", []))
+ 
+        return self.strategy_selector.select(
+            metadata=sizing,
+            is_monorepo=is_monorepo,
+            sparse_dirs=body.get("selected_subprojects", []),
+            total_subprojects_detected=total_subprojects_detected,
+        )
+        
     async def process_single_tenant_job(self, sqs, msg ,kms_client , s3_client , microvm):
         """
         Orchestrates one job end to end. Runs concurrently alongside
@@ -149,7 +204,7 @@ class TrustedOrchestrator:
                 maximum_duration_seconds=settings.MAXIMUM_DURATION_SECONDS,
             )
 
-            
+
 
             # 6. TRUSTED ZONE: Stream S3 JSON into Neo4j (Memory Safe)
             await self.update_job_status(job_id, phase="RECORDING_MANIFEST")
