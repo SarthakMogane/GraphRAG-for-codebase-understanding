@@ -1,5 +1,6 @@
 # app/workers/job_consumer.py
 import asyncio
+import dataclasses
 import ijson , json
 from uuid import UUID
 from typing import Optional
@@ -85,8 +86,8 @@ class TrustedOrchestrator:
     # ─────────────────────────────────────────────────────────────────────────
  
     async def _decide_clone_strategy(
-        self, repo_id: int, owner: str, repo: str, body: dict,
-    ) -> "CloneConfig":
+        self, repo_id: UUID, owner: str, repo: str, body: dict,
+    ) -> CloneConfig:
         """
         Fetches what's already persisted in Postgres — no redundant
         GitHub API call — and calls CloneStrategySelector.select().
@@ -94,9 +95,9 @@ class TrustedOrchestrator:
  
         async with get_system_transaction() as conn:
             repo_row = await conn.fetchrow(
-                "SELECT repo_size_kb, uses_git_lfs FROM repositories WHERE id = $1",
+                "SELECT size_kb, uses_git_lfs FROM repos WHERE id = $1",
                 repo_id,
-            )
+            )   
             scout_row = await conn.fetchrow(
                 """
                 SELECT scout_json FROM repo_scout_results
@@ -111,12 +112,9 @@ class TrustedOrchestrator:
             raise RuntimeError(f"Repo {repo_id} not found — cannot decide clone strategy")
  
         sizing = RepoSizingInfo(
-            size_kb=repo_row["repo_size_kb"] or 0,
+            size_kb=repo_row["size_kb"] or 0,
             owner=owner,
             name=repo,
-            # Nullable — pre-migration-006 rows haven't had this
-            # populated yet. Safe default: assume no LFS rather than
-            # silently skipping content the repo actually needs.
             uses_git_lfs=repo_row["uses_git_lfs"] or False,
         )
  
@@ -170,6 +168,15 @@ class TrustedOrchestrator:
             installation_id = body["installation_id"]
             github_token =  await self.gh.auth.get_installation_token(installation_id)
 
+            # clone strategy
+            clone_config = await self._decide_clone_strategy(repo_id=repo_id, owner=owner ,name=repo,body=body)
+            if clone_config.estimated_disk_mb > settings.CLONE_SANITY_REJECT_MB:
+                raise RuntimeError(
+                    f"Repo {owner}/{repo} estimated at {clone_config.estimated_disk_mb}MB, "
+                    f"exceeds the {settings.CLONE_SANITY_REJECT_MB}MB sanity threshold — "
+                    f"rejecting before MicroVM launch"
+                )
+
             # 3. TRUSTED ZONE: Generate Pre-Signed S3 PUT URL (Zero-Credential Access for Sandbox)
             presigned_s3_url = await s3_client.generate_presigned_url(
                 ClientMethod='put_object',
@@ -191,7 +198,7 @@ class TrustedOrchestrator:
                     "owner":         owner,
                     "repo":          repo,
                     "branch":        body.get("branch", "main"),
-                    "sparse_dirs":   body.get("selected_subprojects", []),
+                    "clone_config":  dataclasses.asdict(clone_config),
                     "submodules":    body.get("selected_submodules", []),
                     "github_token":  github_token,   # never logged — see redaction note in sandbox_app/app.py
                     "presigned_url": presigned_s3_url,
@@ -204,7 +211,7 @@ class TrustedOrchestrator:
                 maximum_duration_seconds=settings.MAXIMUM_DURATION_SECONDS,
             )
 
-
+            
 
             # 6. TRUSTED ZONE: Stream S3 JSON into Neo4j (Memory Safe)
             await self.update_job_status(job_id, phase="RECORDING_MANIFEST")
