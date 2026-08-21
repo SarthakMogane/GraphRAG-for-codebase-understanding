@@ -32,3 +32,25 @@ specifically:
   6. Git version is checked once at construction against the patched
      versions for CVE-2025-48384.
 """
+
+from src.core.logger import get_logger
+from src.core.config import get_settings
+
+logger = get_logger(__name__)
+settings  = get_settings()
+
+class GitCloneService:
+    """
+    Executes git clone commands based on a CloneConfig.
+    All git operations run in a subprocess (not GitPython) because
+    GitPython's clone wrapper doesn't expose all the flags we need.
+ 
+    Stateless across jobs except for the lazily-created hooks sink
+    directory, which is process-wide (empty, never written to) and
+    safe to share.
+    """
+    def __init__(self) -> None:
+        self._verify_git_version()
+
+    def _verify_git_version(self) -> None:
+        pass
