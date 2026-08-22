@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Optional, NamedTuple
 from uuid import UUID
 from dataclasses import dataclass
 import aioboto3
@@ -56,7 +56,7 @@ _RETRYABLE_CODES = {
     "ServiceUnavailable",       # 503 — temporary, try again later
     "RequestTimeoutException",  # 408 — server didn't receive request in time
     "ThrottlingException",      # 400 — rate limited; SDK auto-retries some
-                                 # of this already, but we add a layer too
+    "ServiceQuotaExceededException" # of this already, but we add a layer too
                                  # since default retry config isn't guaranteed
 }
  
@@ -75,16 +75,18 @@ _PERMANENT_CODES = {
     "UnknownOperationException",       # calling an action that doesn't exist
     "UnrecognizedClientException",     # bad credentials
     "ValidationError",                 # bad parameter shape/value
+    "ResourceNotFoundException",       # Snapshot image identifier missing or failed build state
+    "ValidationException"              # Invalid connector ARNs, bad idle policy parameters
 }
 
 @dataclass
-class LaunchResult:
-    microvm_id = str
-    endpoint = str
-    start = int
-    end = int
-    state = str
-    state_reason = str
+class LaunchResult(NamedTuple):
+    microvm_id: str
+    endpoint: str
+    start: int
+    end: int
+    state: str
+    state_reason: str
 
 class MicroVMError(Exception):
     """
@@ -253,7 +255,6 @@ class MicroVMClient:
     # ─────────────────────────────────────────────────────────────────────────
     # Status stream 
     # ─────────────────────────────────────────────────────────────────────────
- 
     async def stream_status(
         self,
         endpoint: str,
