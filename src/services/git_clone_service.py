@@ -34,6 +34,7 @@ specifically:
 """
 import subprocess
 import re
+import base64
 from pathlib import Path
 from typing import Optional
 from src.services.clone_strategy import CloneConfig
@@ -77,7 +78,7 @@ class GitCloneService:
         repo:str,
         clone_config:CloneConfig,
         home_dir:Path,
-        target_dir:str,
+        target_dir:Path,
         auth_token: Optional[str] = None
     ) -> Path:
         """
@@ -96,9 +97,21 @@ class GitCloneService:
                         NOT embedded in the clone URL. Embedding a token in
                         the URL means it gets written into the cloned repo's
         """
-
+        if not auth_token or not auth_token.strip():
+            raise CloneError(
+                f"Access Denied: Refusing unauthenticated clone for {owner}/{repo}. "
+                f"This sandbox is configured for authorized tenant traffic only."
+            )
         self._validate_safe_name(owner,"owner")
         self._validate_safe_name(repo,"repo")
+
+        clone_url = f"https://github.com/{owner}/{repo}.git"
+        auth_flag = self._auth_header_flag(auth_token)
+        dest = Path(target_dir)
+        home_dir.mkdir(parents=True ,exist_ok=True)
+        dest.mkdir(parents=True , exist_ok=True)
+
+        # //strategy decision
         
 
 
@@ -136,8 +149,24 @@ class GitCloneService:
         guarantee this, but this is the last line before the value
         touches a subprocess argument and a path.
         """
-        if not value or _SAFE_NAME_RE.match(value):
+        if not value or not _SAFE_NAME_RE.match(value):
             raise CloneError(
                 f"Refusing to clone: {field}={value!r} contains characters "
                 f"outside [A-Za-z0-9_.-] — possible path or argument injection."
             )
+
+    def _auth_header_flag(self,auth_token:str) -> None:
+        """
+        Build the -c http.extraHeader flag carrying a GitHub installation
+        token, if provided.
+ 
+        Sent via git config header, never the clone URL — see clone()'s
+        docstring for why: a URL-embedded credential gets written into
+        the cloned repo's own .git/config on disk (persists past the
+        clone, re-exposed if that tree is ever inspected/uploaded), and
+        is far more likely to leak into a log line that prints the URL.
+        A config header is scoped to this one invocation only.
+        """
+        basic = base64.b64encode(f"x-access-token:{auth_token}".encode()).decode()
+
+        return ["-c",f"http.extraHeader= AUTHORIZATION : basic {basic}"]
