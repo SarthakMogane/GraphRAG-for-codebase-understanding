@@ -33,6 +33,7 @@ specifically:
      versions for CVE-2025-48384.
 """
 import subprocess
+import os
 import re
 import base64
 from pathlib import Path
@@ -169,4 +170,19 @@ class GitCloneService:
         """
         basic = base64.b64encode(f"x-access-token:{auth_token}".encode()).decode()
 
-        return ["-c",f"http.extraHeader= AUTHORIZATION : basic {basic}"]
+        return ["-c",f"http.extraHeader= AUTHORIZATION : basic {basic}"]    
+
+    def _build_env(self, config:CloneConfig,home_dir:Path) -> dict[str,str]:
+        """
+        Explicit environment allowlist for the git subprocess.
+        """
+        env ={
+            "PATH":os.environ.get("PATH","/usr/bin:/bin"),
+            "HOME":str(home_dir),
+            "GIT_TERMINAL_PROMPT":"0",# never block waiting for interactive input
+            "GIT_ALLOW_PROTOCOL":"https" # only https transport is ever honored
+        }
+
+        if config.skip_lfs:
+            env = env["GIT_LFS_SKIP_SMUDGE"] = "1"
+        return env
