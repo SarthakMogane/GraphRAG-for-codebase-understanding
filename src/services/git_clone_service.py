@@ -218,4 +218,30 @@ class GitCloneService:
             self._hooks_sink = sink
             return self._hooks_sink
 
+    def _git_cmd(self,*args)-> list[str]:
+        """
+        Build a git command line with mandatory safety flags always
+        present, so no call site in this file can accidentally omit them.
  
+        -c core.hooksPath=<empty dir>   → hooks can never execute (CVE-2025-48384)
+        -c protocol.ext.allow=never     → blocks the `ext::` remote helper
+                                          command-injection transport
+        -c protocol.file.allow=never    → blocks `file://` local-path reads
+                                          via a malicious submodule URL
+        -c core.symlinks=false          → git writes a symlink's target as
+                                          plain TEXT content, never creates
+                                          a real OS-level symlink
+        """
+        return [
+            "git",
+            # 1. 🔒 Absolute Security Mitigations
+            "-c",f"core.hooksPath={self._hook_sink_dir()}",
+            "-c","protocol.ext.allow=never", #no external terminal command
+            "-c","protocol.file.allow=never", #no stealing internal system files 
+            "-c","core.symlinks=false",#no symbolic link file hijacking
+            # 2. ⚡ MicroVM Resource Performance Optimization
+            "-c", "feature.manyFiles=true",
+            "-c", "checkout.workers=-1",
+            "-c", "core.compression=0",
+            *args 
+        ]
