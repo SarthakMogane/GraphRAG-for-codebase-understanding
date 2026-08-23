@@ -37,6 +37,7 @@ import os
 import re
 import base64
 import tempfile
+import asyncio
 from pathlib import Path
 from typing import Optional
 from src.services.clone_strategy import CloneConfig
@@ -245,3 +246,48 @@ class GitCloneService:
             "-c", "core.compression=0",
             *args 
         ]
+
+    async def _run(
+            self,
+            cmd:list[str],
+            cwd:Optional[Path] = None,
+            env:Optional[dict] = None,
+            capture_output:bool = False,
+            timeout_seconds:int = 120, #update for dynamic timeout.
+    )-> subprocess.CompletedProcess:
+        """
+        Run a git command asynchronously via asyncio subprocess.
+        Raises CloneError on non-zero exit codes OR on timeout.
+ 
+        timeout_seconds default (120s) covers a normal shallow clone of
+        a large repo over a slow connection without being so generous
+        that a deliberately hostile repo can tie up a worker slot for
+        an unbounded amount of time.
+        """
+    
+        loop = asyncio.get_event_loop()
+        try:
+            result = await loop.run_in_executor(
+                None, lambda:subprocess.run(
+                    cmd,
+                    cwd=str(cwd) if cwd else None,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timout=timeout_seconds
+
+
+                )
+            )
+        except subprocess.TimeoutExpired as e:
+            raise CloneError(
+                f"Git command timed out after {timeout_seconds}s:{' '.join(cmd)}"
+                ) from e
+
+        if result.returncode !=0:
+            raise CloneError(
+                  f"Git command failed (exit {result.returncode}): "
+                f"{' '.join(cmd)}\nstderr: {result.stderr}"
+            )
+
+        return result
