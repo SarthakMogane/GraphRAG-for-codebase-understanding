@@ -36,9 +36,11 @@ import subprocess
 import os
 import re
 import base64
+import tempfile
 from pathlib import Path
 from typing import Optional
 from src.services.clone_strategy import CloneConfig
+from src.models.database import CloneStrategy
 from src.core.logger import get_logger
 from src.core.config import get_settings
 
@@ -70,6 +72,8 @@ class GitCloneService:
     directory, which is process-wide (empty, never written to) and
     safe to share.
     """
+    _hooks_sink: Optional[Path] = None
+
     def __init__(self) -> None:
         self._verify_git_version()
 
@@ -112,7 +116,19 @@ class GitCloneService:
         home_dir.mkdir(parents=True ,exist_ok=True)
         dest.mkdir(parents=True , exist_ok=True)
 
-        # //strategy decision
+        # //strategy execution
+        try:
+            if clone_config.strategy == CloneStrategy.SPARSE_CHECKOUT:
+                await self._clone_sparse(clone_url,dest,clone_config,home_dir,auth_flag)
+            elif clone_config.strategy == CloneStrategy.PARTIAL_BLOB:
+                await self._clone_partial(clone_url,dest,clone_config,home_dir,auth_flag)
+            else:
+                await self._clone_shalllow()
+
+            logger.info("Clone complete: %s/%s → %s", owner, repo, dest)
+            return dest
+        except Exception as e:
+            raise CloneError(f"Clone failed for {owner}/{repo}: {e}") from e
         
 
 
@@ -186,3 +202,20 @@ class GitCloneService:
         if config.skip_lfs:
             env = env["GIT_LFS_SKIP_SMUDGE"] = "1"
         return env
+
+    def _hook_sink_dir(self) -> Path:
+        """
+        Return (creating if needed) an empty, unwritable-by-git directory
+        used as core.hooksPath for every command. Because it's always
+        empty, git can never find a hook script here to execute — this
+        is the direct mitigation for CVE-2025-48384's exploitation step,
+        independent of whatever path confusion the vulnerability causes
+        during checkout.
+        """
+        if self._hooks_sink is None:
+            sink = Path(tempfile.mkdtemp(prefix="git-hooks-sink-"))
+            os.chmod(sink,0o500) # read+execute 
+            self._hooks_sink = sink
+            return self._hooks_sink
+
+ 
