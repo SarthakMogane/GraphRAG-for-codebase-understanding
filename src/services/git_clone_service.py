@@ -131,7 +131,7 @@ class GitCloneService:
         except Exception as e:
             raise CloneError(f"Clone failed for {owner}/{repo}: {e}") from e
         
-
+    
 
     def _verify_git_version(self) -> None:
         try:
@@ -264,7 +264,8 @@ class GitCloneService:
         that a deliberately hostile repo can tie up a worker slot for
         an unbounded amount of time.
         """
-    
+        logger.debug("Running: %s (cwd=%s)", " ".join(self._redact_for_log(cmd)), cwd)
+
         loop = asyncio.get_event_loop()
         try:
             result = await loop.run_in_executor(
@@ -291,3 +292,21 @@ class GitCloneService:
             )
 
         return result
+
+    def _redact_for_log(self, cmd: list[str]) -> list[str]:
+        """
+        Scans the outgoing Git command array and replaces sensitive 
+        HTTP authorization tokens with a safe placeholder string.
+        """
+        cleaned_cmd = []
+        
+        for argument in cmd:
+            # Regex scans for any parameter starting with 'http.extraHeader=AUTHORIZATION:'
+            if "http.extraHeader" in argument and "AUTHORIZATION" in argument:
+                # Swap out the sensitive token payload with an inert string representation
+                cleaned_cmd.append("http.extraHeader=AUTHORIZATION: basic [REDACTED]")
+            else:
+                # Keep standard, non-sensitive flags exactly as they are
+                cleaned_cmd.append(argument)
+                
+        return cleaned_cmd
