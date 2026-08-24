@@ -150,6 +150,17 @@ class GitCloneService:
         env = self._build_env(clone_config,home_dir)
         await self._run(cmd,env=env)
 
+    async def _clone_partial(
+            self,url:str,dest:Path,config:CloneConfig,home_dir:Path,
+            auth_flags:list[str]
+    ) -> None:
+        """
+        Partial clone with blob filter.
+        git clone --depth 1 --filter=blob:none --single-branch <url> <dest>
+ 
+        File content is NOT downloaded during clone.
+        Git fetches blob content lazily when each file is first accessed.
+        """
     def _verify_git_version(self) -> None:
         try:
             result = subprocess.run(["git","--version"],capture_output=True , text=str, timeout=5)
