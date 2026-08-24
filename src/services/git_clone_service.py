@@ -161,6 +161,81 @@ class GitCloneService:
         File content is NOT downloaded during clone.
         Git fetches blob content lazily when each file is first accessed.
         """
+        extra =["--no-checkout"] if config.no_checkout else []
+        cmd = self._git_cmd(
+            *auth_flags,
+            "clone",
+            "--depth",str(config.depth),
+            "--filter=blob:none",
+            *extra,
+            "--single-branch",
+            url,
+            str(dest),   
+        )
+        env = self._build_env(config,home_dir)
+        await self._run(cmd=cmd,env=env)
+
+        if config.no_checkout:
+            await self._run(
+                self._git_cmd("checkout"),
+                cwd=dest,
+                env=env,
+            )
+
+    async def _clone_sparse(
+        self,url:str,dest:Path,config:CloneConfig,
+        home_dir:Path,auth_flags: list[str]
+    ) -> None:
+        """
+        Sparse checkout in cone mode — only materializes specified directories.
+        Full sequence:
+        1. Clone with --no-checkout and --filter=blob:none (nothing on disk)
+        2. Initialize sparse-checkout in cone mode
+        3. Set the approved directory list
+        4. Checkout (only those directories land on disk)
+ 
+        Cone mode is ~10x faster than non-cone mode for large repos because
+        it uses simple prefix matching rather than .gitignore-style patterns.
+        """
+
+        cmd_clone = self._git_cmd(
+            *auth_flags,
+            "clone",
+            "--depth",str(config.depth),
+            "--filter=blob:none",
+            "--no-checkout",
+            "--single-branch",
+            url,
+            str(dest),
+        )
+        env= self._build_env(config,home_dir=home_dir)
+        await self._run(cmd_clone,env=env)
+
+         #  Initialize sparse checkout in cone mode
+        await self._run(
+            self._git_cmd("sparse-checkout","init","--cone"),
+            cwd=dest,
+            env=env,
+        )
+        # Set which directories to include
+        dirs_to_include = config.sparse_dirs or []
+        await self._run(
+            self._git_cmd("sparse-checkout","set",*dirs_to_include),
+            cwd=dest,
+            env=env,
+        )
+
+        #  Checkout — only the specified directories land on disk
+        await self._run(
+            self._git_cmd("checkout"),
+            cwd=dest,
+            env=env,
+        )
+
+        logger.info(
+            "Sparse checkout complete - materialized %d directories",len(dirs_to_include)
+        )
+
     def _verify_git_version(self) -> None:
         try:
             result = subprocess.run(["git","--version"],capture_output=True , text=str, timeout=5)
