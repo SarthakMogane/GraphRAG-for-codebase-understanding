@@ -131,7 +131,24 @@ class GitCloneService:
         except Exception as e:
             raise CloneError(f"Clone failed for {owner}/{repo}: {e}") from e
         
-    
+    async def _clone_shallow(
+        self, url:str, dest:Path, clone_config:CloneConfig, home_dir:Path,
+        auth_flag:list[str] 
+    )-> None:
+        """
+        Standard shallow clone — simplest case.
+        git clone --depth 1 --single-branch <url> <dest>
+        """
+        cmd = self._git_cmd(
+            *auth_flag,
+            "clone",
+            "--depth",str(clone_config.depth),
+            "--single-branch",
+            url,
+            str(dest),
+        )
+        env = self._build_env(clone_config,home_dir)
+        await self._run(cmd,env=env)
 
     def _verify_git_version(self) -> None:
         try:
@@ -265,7 +282,7 @@ class GitCloneService:
         an unbounded amount of time.
         """
         logger.debug("Running: %s (cwd=%s)", " ".join(self._redact_for_log(cmd)), cwd)
-
+        
         loop = asyncio.get_event_loop()
         try:
             result = await loop.run_in_executor(
