@@ -89,47 +89,20 @@ class TrustedOrchestrator:
         self, repo_id: UUID, owner: str, repo: str, body: dict,
     ) -> CloneConfig:
         """
-        Fetches what's already persisted in Postgres — no redundant
-        GitHub API call — and calls CloneStrategySelector.select().
+        create metadata and calls CloneStrategySelector.select().
         """
- 
-        async with get_system_transaction() as conn:
-            repo_row = await conn.fetchrow(
-                "SELECT size_kb, uses_git_lfs FROM repos WHERE id = $1",
-                repo_id,
-            )   
-            scout_row = await conn.fetchrow(
-                """
-                SELECT scout_json FROM repo_scout_results
-                WHERE repo_id = $1
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                repo_id,
-            )
- 
-        if not repo_row:
-            raise RuntimeError(f"Repo {repo_id} not found — cannot decide clone strategy")
- 
         sizing = RepoSizingInfo(
-            size_kb=repo_row["size_kb"] or 0,
+            size_kb=body.get("validation_payload",0).get("size_kb",0),
             owner=owner,
             name=repo,
-            uses_git_lfs=repo_row["uses_git_lfs"] or False,
+            uses_git_lfs=body.get("validation_payload",False).get("uses_git_lfs",False)
         )
- 
-        is_monorepo = False
-        total_subprojects_detected = 0
-        if scout_row and scout_row["scout_json"]:
-            scout_data = scout_row["scout_json"]
-            is_monorepo = scout_data.get("is_monorepo", False)
-            total_subprojects_detected = len(scout_data.get("subprojects", []))
  
         return self.strategy_selector.select(
             metadata=sizing,
-            is_monorepo=is_monorepo,
-            sparse_dirs=body.get("selected_subprojects", []),
-            total_subprojects_detected=total_subprojects_detected,
+            is_monorepo=body.get("is_monorepo",False),
+            sparse_dirs=body.get("selection_payload",[]).get("selected_subprojects", []),
+            total_subprojects_detected=body.get("selection_payload",0).get("total_subprojects",0)
         )
         
     async def process_single_tenant_job(self, sqs, msg ,kms_client , s3_client , microvm):
@@ -190,7 +163,7 @@ class TrustedOrchestrator:
                 job_id, owner, repo, tenant_id,
             )
             # 4. UNTRUSTED ZONE: Invoke Sandbox via Secure Response Streaming
-            microvm_id, endpoint,_= await self.microvm.launch(
+            microvm_id, endpoint,start,*others= await self.microvm.launch(
                 image_identifier=settings.SANDBOX_MICROVM_IMAGE_ARN,
                 run_hook_payload={
                     "job_id":        str(job_id),
