@@ -49,6 +49,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sandbox_microvm.workspace import JobWorkspace
 from src.services.github import RepoMetadata
+from src.services.git_clone_service import GitCloneService
 
 logger = logging.getLogger("sandbox_app")
 logging.basicConfig(level=logging.INFO)
@@ -61,6 +62,8 @@ _job_state:dict ={
     "error":None,
     "time":None,
 }
+
+_clone_svc = GitCloneService()
 JOB_TIMEOUT_SECONDS = 3600
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -171,7 +174,7 @@ async def _run_job(payload:dict):
     owner         = payload["owner"]
     repo          = payload["repo"]
     branch        = payload.get("branch", "main")
-    sparse_dirs   = payload.get("sparse_dirs", [])
+    clone_configs   = payload.get("clone_configs", [])
     submodules    = payload.get("submodules", [])
     github_token  = payload["github_token"]
     presigned_url = payload["presigned_url"]
@@ -179,7 +182,17 @@ async def _run_job(payload:dict):
 
     try:
         async with JobWorkspace(job_id=job_id,account_id=account_id,base_dir="/temp/ingestion") as ws:
-            home_dir = ws.tmp_dir/"home"
+            home_dir = ws.tmp_dir
+            target_dir = ws.clone_dir
+
+            await _clone_svc.clone(
+                owner=owner,
+                repo=repo,
+                clone_config=clone_configs,
+                home_dir=home_dir,
+                target_dir=target_dir,
+                auth_token=github_token)
+
 
     except:
         pass
