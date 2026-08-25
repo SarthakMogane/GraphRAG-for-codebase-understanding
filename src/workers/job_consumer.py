@@ -61,13 +61,14 @@ class TrustedOrchestrator:
             # Task was cancelled successfully when the main job finished
             logger.debug("Heartbeat task cancelled cleanly.")
 
-    async def update_job_status(self, job_id: UUID, phase: str, node_count: Optional[int]= None):
+    async def update_job_status(self, job_id: UUID, repo_id: UUID,phase: str, node_count: Optional[int]= None):
         """Updates the central database directly from the Trusted Orchestrator."""
         async with get_system_transaction() as conn:
             await conn.execute(
                 "UPDATE ingestion_jobs SET phase = $1, node_count = COALESCE ($2, node_count) WHERE id = $3",
                 phase, node_count, job_id
             )
+            
             logger.info("Job %s transitioned to %s", job_id, phase)
     
     async def _already_terminal(self, job_id: UUID) -> bool:
@@ -314,6 +315,10 @@ class TrustedOrchestrator:
             await conn.execute(
                 "UPDATE ingestion_jobs SET status='failed', completed_at=NOW(), error_message=$2, phase='FAILED' WHERE id=$1",
                 str(job_id), error[:2000],
+            )
+            await conn.execute(
+                "UPDATE repos SET index_status='failed' WHERE id=$1",
+                repo_id,
             )
 
 
