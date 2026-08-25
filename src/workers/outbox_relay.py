@@ -64,10 +64,14 @@ class MaintenanceWorker:
             # SKIP LOCKED guarantees no deadlocks if you boot 5 relay containers
             pending_jobs = await conn.fetch(
                 """
-                SELECT ij.id, ij.repo_id, ij.account_id, ij.job_type,r.repo_name, r.owner_login, r.default_branch, r.size_kb,
-                       us.selected_subprojects, us.selected_submodules
+                SELECT ij.id, ij.repo_id, ij.account_id, ij.job_type,r.repo_name, r.owner_login,
+                       r.default_branch, r.size_kb,r.using_git_lfs,
+                       us.selected_subprojects, us.selected_submodules,
+                       rsr.head_sha,rsr.scout_json
+
                 FROM ingestion_jobs ij
                 JOIN repos r ON r.id = ij.repo_id
+                JOIN repo_scout_result rsr ON rsr.repo_id = r.id
                 JOIN user_selections us ON us.id = ij.selection_id
                 WHERE ij.status = 'dispatch_pending'
                 ORDER BY ij.created_at ASC
@@ -88,6 +92,10 @@ class MaintenanceWorker:
 
             async with self.session.client('sqs') as sqs_client:
                 successful_job_ids = []
+                scout_json = job["scout_json"] or {}
+                monorepo = scout_json.get("is_monorepo",False)
+                total_subprojects = len(scout_json.get("subprojects",[]))
+
                 for job in pending_jobs:
                     delivery_id = str(job["id"])
                     group_id = str(job["repo_id"])
@@ -98,14 +106,19 @@ class MaintenanceWorker:
                         "owner":str(job["owner_name"]),
                         "job_id": str(job["id"]),
                         "job_type": job["job_type"],
+                        "head_sha":job["head_sha"],
+                        "is_monorepo":monorepo,
+                        
+
                         "selection_payload": {
+                            "total_subprojects":total_subprojects,
                             "selected_subprojects": job["selected_subprojects"],
                             "selected_submodules": job["selected_submodules"],
                         },
                         "validation_payload": {
                             "default_branch": job["default_branch"],
                             "size_kb": job["size_kb"] or 0,
-                            "has_submodules": True,
+                            "uses_git_lfs":job["using_git_lfs"] or False,
                         }
                     }
 
