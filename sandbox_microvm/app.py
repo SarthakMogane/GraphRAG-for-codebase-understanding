@@ -63,9 +63,16 @@ _job_state:dict ={
     "time":None,
 }
 
+_status_queue:asyncio.Queue = asyncio.Queue()
 _clone_svc = GitCloneService()
 JOB_TIMEOUT_SECONDS = 3600
 
+#emiting phase from SSE
+async def _emit_phase(phase:str,error:Optional[str] = None):
+    """Helper to update local state and push to the SSE status queue."""
+    _job_state["phase"] = phase
+    _job_state["error"] = error
+    return _status_queue.put({"phase":phase,"error":error})
 # ─────────────────────────────────────────────────────────────────────────────
 # Image build hooks (only called during create-microvm-image / update)
 # ─────────────────────────────────────────────────────────────────────────────
