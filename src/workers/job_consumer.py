@@ -17,6 +17,7 @@ from src.services.microvm_client import MicroVMClient
 from src.services.github import GitHubService
 from src.workers.utils.callback import _active_background_tasks,handle_task_completion
 from src.services.clone_strategy import CloneStrategySelector , RepoSizingInfo , CloneConfig
+from src.models.database import RepoStatus
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -61,14 +62,28 @@ class TrustedOrchestrator:
             # Task was cancelled successfully when the main job finished
             logger.debug("Heartbeat task cancelled cleanly.")
 
-    async def update_job_status(self, job_id: UUID, repo_id: UUID,phase: str, node_count: Optional[int]= None):
+    _PHASE_TO_REPO_STATUS = {
+        "CLONING_REPO":       RepoStatus.CLONING,
+        "FILTERING":          RepoStatus.FILTERING,
+        "PARSING_AST":        RepoStatus.MANIFESTING,
+        "UPLOADING":          RepoStatus.MANIFESTING,
+        "RECORDING_MANIFEST": RepoStatus.MANIFESTING,
+        "FAILED":             RepoStatus.FAILED
+    }
+
+    async def _update_job_phase(self, job_id: UUID, repo_id: UUID,phase: str, node_count: Optional[int]= None):
         """Updates the central database directly from the Trusted Orchestrator."""
         async with get_system_transaction() as conn:
             await conn.execute(
                 "UPDATE ingestion_jobs SET phase = $1, node_count = COALESCE ($2, node_count) WHERE id = $3",
                 phase, node_count, job_id
             )
-            
+            repo_status = self._PHASE_TO_REPO_STATUS.get(phase)
+            if repo_status:
+                await conn.execute(
+                    "UPDATE repos SET index_status = $1 WHERE id = $2",
+                    repo_status.value, repo_id,
+                )
             logger.info("Job %s transitioned to %s", job_id, phase)
     
     async def _already_terminal(self, job_id: UUID) -> bool:
@@ -92,18 +107,20 @@ class TrustedOrchestrator:
         """
         create metadata and calls CloneStrategySelector.select().
         """
+        validation=body.get("validation_payload",{})
         sizing = RepoSizingInfo(
-            size_kb=body.get("validation_payload",0).get("size_kb",0),
+            size_kb=validation.get("size_kb",0),
             owner=owner,
             name=repo,
-            uses_git_lfs=body.get("validation_payload",False).get("uses_git_lfs",False)
+            uses_git_lfs=validation.get("uses_git_lfs",False)
         )
- 
+
+        selection = body.get("selection_payload",{})
         return self.strategy_selector.select(
             metadata=sizing,
             is_monorepo=body.get("is_monorepo",False),
-            sparse_dirs=body.get("selection_payload",[]).get("selected_subprojects", []),
-            total_subprojects_detected=body.get("selection_payload",0).get("total_subprojects",0)
+            sparse_dirs=selection.get("selected_subprojects", []),
+            total_subprojects_detected=selection.get("total_subprojects",0)
         )
         
     async def process_single_tenant_job(self, sqs, msg ,kms_client , s3_client , microvm):
@@ -137,7 +154,7 @@ class TrustedOrchestrator:
                 self.extend_visibility_heartbeat(sqs, self.queue_url ,receipt_handle)
             )
 
-            await self.update_job_status(job_id, phase="ORCHESTRATING")
+            await self._update_job_phase(job_id,repo_id=repo_id,phase="ORCHESTRATING")
 
             installation_id = body["installation_id"]
             github_token =  await self.gh.auth.get_installation_token(installation_id)
@@ -158,7 +175,7 @@ class TrustedOrchestrator:
                 ExpiresIn=1800 # 30 minutes
             )
 
-            await self.update_job_status(job_id, phase="CLONING_REPO")
+            await self._update_job_phase(job_id,repo_id=repo_id, phase="LAUNCHING_SANDBOX")
             logger.info(
                 "Invoking sandbox for job=%s owner=%s repo=%s (tenant=%s)",
                 job_id, owner, repo, tenant_id,
@@ -181,18 +198,18 @@ class TrustedOrchestrator:
                 egress_connector_name=settings.MICROVM_EGRESS_CONNECTOR_NAME,
                 ingress_connector_name = settings.MICROVM_INGRESS_CONNECTOR_NAME,
                 execution_role_arn=settings.MICROVM_EXECUTION_ROLE_ARN,
-                imgae_version=settings.IMAGE_VERSION,
+                image_version=settings.IMAGE_VERSION,
                 maximum_duration_seconds=settings.MAXIMUM_DURATION_SECONDS,
             )
 
             
 
             # 6. TRUSTED ZONE: Stream S3 JSON into Neo4j (Memory Safe)
-            await self.update_job_status(job_id, phase="RECORDING_MANIFEST")
+            await self._update_job_phase(job_id,repo_id=repo_id, phase="RECORDING_MANIFEST")
             manifest_rows, ast_nodes_written =await self._stream_output_and_record(sqs,s3_client, s3_key,job_id, repo_id , tenant_id)
 
             # 7. Cleanup & Completion
-            await self.update_job_status(job_id, phase="COMPLETED", node_count=ast_nodes_written)
+            await self._update_job_phase(job_id,repo_id=repo_id, phase="COMPLETED", node_count=ast_nodes_written)
             await self._mark_job_completed(job_id, repo_id, len(manifest_rows))
             await s3_client.delete_object(Bucket=settings.STAGING_BUCKET, Key=s3_key)
             
@@ -204,7 +221,7 @@ class TrustedOrchestrator:
 
         except Exception as e:
             logger.exception("Failed to process job %s: %s", job_id, e)
-            await self.update_job_status(job_id, phase="FAILED")
+            await self._update_job_phase(job_id,repo_id=repo_id,phase="FAILED")
             await self._mark_job_failed(job_id, repo_id, str(e))
             # Do NOT delete the SQS message; let visibility timeout expire for redrive.
 
