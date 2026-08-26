@@ -202,7 +202,24 @@ class TrustedOrchestrator:
                 maximum_duration_seconds=settings.MAXIMUM_DURATION_SECONDS,
             )
 
-            
+            try:
+                auth_token = await self.microvm.create_auth_token(
+                    microvm_id, allowed_ports=[8080],expire=settings.EXPIRE_MICROVM_AUTH_TOKEN
+                )
+ 
+                async for event in self.microvm.stream_status(
+                    endpoint, auth_token, timeout_seconds=600
+                ):
+                    await self._update_job_phase(job_id,repo_id=repo_id,phase=event.get("phase", "PROCESSING"))
+                    if event.get("phase") == "FAILED":
+                        raise RuntimeError(f"Sandbox error: {event.get('error')}")
+ 
+            finally:
+                # Explicit termination is the normal path here — not the
+                # idle-policy fallback. See microvm_client.launch()'s
+                # docstring for why we don't rely on suspend/resume for
+                # this one-shot job model.
+                await self.microvm.terminate(microvm_id)
 
             # 6. TRUSTED ZONE: Stream S3 JSON into Neo4j (Memory Safe)
             await self._update_job_phase(job_id,repo_id=repo_id, phase="RECORDING_MANIFEST")
