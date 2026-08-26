@@ -117,7 +117,29 @@ def _classify(exc:ClientError) -> MicroVMError:
 
     return MicroVMError(f"{code}: {message}", code=code, retryable=retryable)
 
+_RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
+
+def _classify_httpx(exc: httpx.HTTPStatusError) -> MicroVMError:
+    status_code = exc.response.status_code
+    retryable = status_code in _RETRYABLE_HTTP_STATUSES
+    
+    code = f"HTTP_{status_code}"
+    message = f"Status stream HTTP error: {status_code}"
+
+    # Extract JSON error payload from response if present
+    try:
+        body = exc.response.json()
+        if isinstance(body, dict):
+            code = body.get("code") or body.get("error") or code
+            message = body.get("message") or body.get("detail") or message
+    except Exception:
+        pass
+
+    return MicroVMError(message=f"[{code}] {message}", code=str(code), retryable=retryable)
+
 def _should_retry(exc:BaseException) -> bool:
+    if isinstance(exc,MicroVMError):
+        return exc.retryable
     if isinstance(exc,ClientError):
         code  = exc.response.get("Error",{}).get("Code","Unknown")
         return code in _RETRYABLE_CODES
@@ -232,7 +254,7 @@ class MicroVMClient:
 
 # Terminate — errors here are logged, never raised
 # ─────────────────────────────────────────────────────────────────────────
-    
+    @_retry_transient
     async def terminate(self, microvm_id: str) -> None:
         """
         Deliberately swallows errors rather than raising — termination
