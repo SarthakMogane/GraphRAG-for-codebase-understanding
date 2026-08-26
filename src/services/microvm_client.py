@@ -263,18 +263,43 @@ class MicroVMClient:
     ) -> AsyncIterator[dict]:
         url = f"https://{endpoint}/status"
         headers = {"X-aws-proxy-auth": auth_token}
- 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=timeout_seconds)) as client:
+
+        start_time = asyncio.get_running_loop().time()
+        while True:
+            elapsed = asyncio.get_running_loop().time() - start_time
+            remaining_time = timeout_seconds - elapsed
+
+            if remaining_time <= 0:
+                break
             try:
-                async with client.stream("GET", url, headers=headers) as response:
-                    response.raise_for_status()
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data:"):
-                            continue
-                        payload = json.loads(line[len("data:"):].strip())
-                        yield payload
-                        if payload.get("phase") in ("COMPLETED", "FAILED"):
-                            return
+                # Dynamic read timeout tied directly to remaining budget
+                timeout_cfg = httpx.Timeout(
+                    connect=10.0,
+                    read=remaining_time,
+                    write=10.0,
+                    pool=10.0,
+                )
+                async with httpx.AsyncClient(timeout=timeout_cfg) as client:
+
+                        async with client.stream("GET", url, headers=headers) as response:
+                            response.raise_for_status()
+                            async for line in response.aiter_lines():
+                                # Ignore SSE comments/pings (e.g., ": ping\n\n")
+                                if line.startswith(":") or not line.startswith("data:"):
+                                    continue
+                                payload = json.loads(line[len("data:"):].strip())
+                                yield payload
+                                if payload.get("phase") in ("VM_WORK_COMPLETED", "FAILED"):
+                                    return
+
+            except (httpx.RemoteProtocolError , httpx.TransportError) as e:
+                # Handles unexpected drops, socket resets, and proxy idle hangouts
+                elapsed = asyncio.get_running_loop().time() - start_time
+                if elapsed > timeout_seconds:
+                    break
+                logger.warning("Status stream dropped (%s). Retrying connection...", e)
+                await asyncio.sleep(1.0)
+                continue
             except httpx.TimeoutException as e:
                 # Retryable in principle (network blip), but at the job
                 # level a hung sandbox after several minutes is treated
@@ -287,8 +312,12 @@ class MicroVMClient:
                     retryable=False,
                 ) from e
             except httpx.HTTPStatusError as e:
-                raise MicroVMError(
-                    f"Status stream HTTP error: {e.response.status_code}",
-                    code=f"HTTP{e.response.status_code}",
-                    retryable=e.response.status_code in (502, 503, 504),
-                ) from e
+                # 502, 503, 504 are retryable at the SQS JOB level (fresh VM)
+                # 4xx errors are NOT retryable
+                raise _classify_httpx(e) from e
+
+        raise MicroVMError(
+        f"Status stream timed out after {timeout_seconds}s across reconnects",
+        code="StatusStreamTimeout",
+        retryable=False,
+        )
