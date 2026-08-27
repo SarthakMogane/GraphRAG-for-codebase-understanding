@@ -86,21 +86,22 @@ async def status_stream():
             try:
                 # 15s timeout prevents AWS/proxy idle timeouts
                 event = await asyncio.wait_for(_status_queue.get(),timeout=15.0)
+                try:
+                    data = json.dumps({
+                        "phase":event["phase"],
+                        "error":event.get("error")
+                    })
 
-                data = json.dumps({
-                    "phase":event["phase"],
-                    "error":event.get("error")
-                })
-
-                yield f"data: {data}\n\n"
-                _status_queue.task_done()
-                if event["phase"] in ("VM_WORK_COMPLETED","FAILED"):
-                    break
-
+                    yield f"data: {data}\n\n"
+                    if event["phase"] in ("VM_WORK_COMPLETED","FAILED"):
+                        break
+                finally:
+                    # Guarantees task completion acknowledgment even on client disconnect/cancellation
+                    _status_queue.task_done()
             except asyncio.TimeoutError:
                 # Send SSE comment to keep socket active
                 yield ": ping\n\n"
-                
+
         return StreamingResponse(event_generator(),media_type="text/event-stream")
 # ─────────────────────────────────────────────────────────────────────────────
 # Image build hooks (only called during create-microvm-image / update)
