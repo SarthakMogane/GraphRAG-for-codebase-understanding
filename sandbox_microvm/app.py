@@ -72,7 +72,36 @@ async def _emit_phase(phase:str,error:Optional[str] = None):
     """Helper to update local state and push to the SSE status queue."""
     _job_state["phase"] = phase
     _job_state["error"] = error
-    return _status_queue.put({"phase":phase,"error":error})
+    _status_queue.put_nowait({"phase":phase,"error":error}) #no size set so for fast put_nowait
+
+# Streaming Status Endpoint 
+@app.get("/status")
+async def status_stream():
+    async def event_generator():
+        # 1. Yield snapshot immediately to recover lost events on reconnect
+        yield f"data: {json.dumps(_job_state)}\n\n"
+        if _job_state["phase"] in ("VM_WORK_COMPLETED", "PARSING_COMPLETED", "FAILED"):
+            return
+        while True:
+            try:
+                # 15s timeout prevents AWS/proxy idle timeouts
+                event = await asyncio.wait_for(_status_queue.get(),timeout=15.0)
+
+                data = json.dumps({
+                    "phase":event["phase"],
+                    "error":event.get("error")
+                })
+
+                yield f"data: {data}\n\n"
+                _status_queue.task_done()
+                if event["phase"] in ("VM_WORK_COMPLETED","FAILED"):
+                    break
+
+            except asyncio.TimeoutError:
+                # Send SSE comment to keep socket active
+                yield ": ping\n\n"
+                
+        return StreamingResponse(event_generator(),media_type="text/event-stream")
 # ─────────────────────────────────────────────────────────────────────────────
 # Image build hooks (only called during create-microvm-image / update)
 # ─────────────────────────────────────────────────────────────────────────────
