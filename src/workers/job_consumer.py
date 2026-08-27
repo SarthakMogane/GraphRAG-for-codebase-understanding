@@ -14,7 +14,16 @@ from src.core.config import get_settings
 from src.core.crypto import decrypt_token
 from src.workers.ingestion_worker import IngestionWorker, PermanentJobFailure, TransientJobFailure
 from src.services.microvm_client import MicroVMClient,MicroVMError
-from src.services.github import GitHubService
+from src.services.github import (
+    GitHubAPIError,
+    GitHubAuthenticationError,
+    GitHubConflictError,
+    GitHubService,
+    GitHubValidationError,
+    RateLimitError,
+    RepoAccessError,
+    RepoNotFoundError,
+)
 from src.workers.utils.callback import _active_background_tasks,handle_task_completion
 from src.services.clone_strategy import CloneStrategySelector , RepoSizingInfo , CloneConfig
 from src.models.database import RepoStatus
@@ -33,11 +42,10 @@ class TrustedOrchestrator:
         self.session = aioboto3.Session(
             aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
             aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-            region_name=settings.AWS_REGION
-            
-        ),
-        self.gh = GitHubService(),
-        self.queue_url = settings.SQS_INGESTION_QUEUE_URL,
+            region_name=settings.AWS_REGION,
+        )
+        self.gh = GitHubService()
+        self.queue_url = settings.SQS_INGESTION_QUEUE_URL
         self.microvm = MicroVMClient(self.session)
         self.strategy_selector = CloneStrategySelector()
 
@@ -158,23 +166,36 @@ class TrustedOrchestrator:
             await self._update_job_phase(job_id,repo_id=repo_id,phase="ORCHESTRATING")
 
             installation_id = body["installation_id"]
-            github_token =  await self.gh.auth.get_installation_token(installation_id)
+            github_token = getattr(self.gh, "auth", self.gh)
+            if hasattr(github_token, "get_installation_token"):
+                github_token = await github_token.get_installation_token(installation_id)
+            else:
+                github_token = await self.gh.get_installation_token(installation_id)
+           
 
             # clone strategy
-            clone_config = await self._decide_clone_strategy(repo_id=repo_id, owner=owner ,name=repo,body=body)
+            clone_config = await self._decide_clone_strategy(repo_id=repo_id, owner=owner ,repo=repo,body=body)
             if clone_config.estimated_disk_mb > settings.CLONE_SANITY_REJECT_MB:
-                raise RuntimeError(
-                    f"Repo {owner}/{repo} estimated at {clone_config.estimated_disk_mb}MB, "
-                    f"exceeds the {settings.CLONE_SANITY_REJECT_MB}MB sanity threshold — "
-                    f"rejecting before MicroVM launch"
+                raise MicroVMError(
+                    f"Repo {owner}/{repo} estimated at {clone_config.estimated_disk_mb}MB "
+                    f"exceeds the {settings.CLONE_SANITY_REJECT_MB}MB sanity limit",
+                    code="SANITY_REPO_TOO_LARGE",
+                    retryable=False,
                 )
 
             # 3. TRUSTED ZONE: Generate Pre-Signed S3 PUT URL (Zero-Credential Access for Sandbox)
-            presigned_s3_url = await s3_client.generate_presigned_url(
-                ClientMethod='put_object',
-                Params={'Bucket': settings.STAGING_BUCKET, 'Key': s3_key},
-                ExpiresIn=1800 # 30 minutes
-            )
+            try:
+                presigned_s3_url = await s3_client.generate_presigned_url(
+                    ClientMethod="put_object",
+                    Params={"Bucket": settings.STAGING_BUCKET, "Key": s3_key},
+                    ExpiresIn=1800,
+                )
+            except Exception as e:
+                raise MicroVMError(
+                    f"Failed to sign staging upload URL for key {s3_key}: {e}",
+                    code="STAGING_URL_SIGNING_FAILED",
+                    retryable=False,  # Configuration/credential issues won't fix themselves on immediate retry
+                ) from e
 
             await self._update_job_phase(job_id,repo_id=repo_id, phase="LAUNCHING_SANDBOX")
             logger.info(
@@ -246,6 +267,44 @@ class TrustedOrchestrator:
             logger.info("Job %s completed — %d nodes written", job_id, ast_nodes_written)
             logger.info("Job %s successfully completed and removed from queue.", job_id)
 
+        # ── GitHub Exceptions Mapping ──────────────────────────────────────────
+        except RepoNotFoundError as e:
+            logger.error("Job %s Permanent Failure: Repository %s/%s missing.", job_id, owner, repo)
+            await self._update_job_phase(job_id, repo_id=repo_id, phase="FAILED")
+            await self._mark_job_failed(job_id, repo_id, f"[REPO_NOT_FOUND] {e}")
+            await sqs.delete_message(QueueUrl=self.queue_url, ReceiptHandle=receipt_handle)
+
+        except RepoAccessError as e:
+            logger.error("Job %s Permanent Failure: Access forbidden to %s/%s.", job_id, owner, repo)
+            await self._update_job_phase(job_id, repo_id=repo_id, phase="FAILED")
+            await self._mark_job_failed(job_id, repo_id, f"[GITHUB_AUTH_REVOKED] {e}")
+            await sqs.delete_message(QueueUrl=self.queue_url, ReceiptHandle=receipt_handle)
+
+        except (GitHubAuthenticationError, GitHubValidationError, GitHubConflictError) as e:
+            code = getattr(e, "code", "GITHUB_PERMANENT_ERROR")
+            logger.error("Job %s Permanent GitHub Error [%s]: %s", job_id, code, e)
+            await self._update_job_phase(job_id, repo_id=repo_id, phase="FAILED")
+            await self._mark_job_failed(job_id, repo_id, f"[{code}] {e}")
+            await sqs.delete_message(QueueUrl=self.queue_url, ReceiptHandle=receipt_handle)
+
+        except RateLimitError as e:
+            logger.warning("Job %s Rate Limit Reached. Setting RETRYING for visibility redrive.", job_id)
+            await self._update_job_phase(job_id, repo_id=repo_id, phase="RETRYING")
+            await self._mark_job_failed(job_id, repo_id, f"[GITHUB_RATE_LIMIT_EXCEEDED] {e}")
+
+        except GitHubAPIError as e:
+            is_transient = e.status_code is None or (e.status_code >= 500)
+            if is_transient:
+                logger.warning("Job %s Transient GitHub API Error (status=%s). Retrying.", job_id, e.status_code)
+                await self._update_job_phase(job_id, repo_id=repo_id, phase="RETRYING")
+                await self._mark_job_failed(job_id, repo_id, f"[GITHUB_SERVER_ERROR] {e}")
+            else:
+                logger.error("Job %s Permanent GitHub API Error (status=%s). Purging.", job_id, e.status_code)
+                await self._update_job_phase(job_id, repo_id=repo_id, phase="FAILED")
+                await self._mark_job_failed(job_id, repo_id, f"[GITHUB_API_ERROR] {e}")
+                await sqs.delete_message(QueueUrl=self.queue_url, ReceiptHandle=receipt_handle)
+
+        # ── MicroVM & General Exceptions Mapping ────────────────────────────────
         except MicroVMError as e:
             # Structured log including code and retryable status
             logger.error(
@@ -259,7 +318,7 @@ class TrustedOrchestrator:
 
             # Non-retryable errors are explicitly purged from SQS to avoid deadlocks
             else:
-                await self._mark_job_failed(job_id, repo_id, error_code=e.code, error_message=str(e))
+                await self._mark_job_failed(job_id, repo_id, error_message=f"[{e.code}] {e}")
                 logger.warning("Deleting non-retryable job %s from SQS queue", job_id)
                 await sqs.delete_message(QueueUrl=self.queue_url, ReceiptHandle=receipt_handle)
                 
