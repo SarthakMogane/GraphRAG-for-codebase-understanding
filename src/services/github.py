@@ -17,9 +17,8 @@ import hashlib
 import logging
 from datetime import datetime
 from typing import Optional
-
 import httpx
-import jwt                          # PyJWT — for GitHub App JWT generation
+import jwt                         
 from pydantic import BaseModel, Field, ConfigDict
 from tenacity import (
     retry,
@@ -27,10 +26,11 @@ from tenacity import (
     wait_exponential,
 )
 import asyncio
+from src.core.logger import get_logger
 from src.core.config import get_settings
 from src.utils.auth_helpers import _parse_token_expiry
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 settings = get_settings()
 
 
@@ -80,17 +80,34 @@ class CommitSummary(BaseModel):
 
 
 # ── Custom Exceptions ─────────────────────────────────────────────────────────
+class GitHubAPIError(Exception):
+    """Base custom exception class for all GithubAPI error"""
+    def __init__(self,message:str,code:Optional[int] = None):
+        super().__init__(message)
+        self.status_code = code
 
-class RateLimitError(Exception):
+class RateLimitError(GitHubAPIError):
     """Raised when GitHub API rate limit buffer is reached."""
     pass
 
-class RepoNotFoundError(Exception):
+class RepoNotFoundError(GitHubAPIError):
     """Raised when a repository does not exist or is inaccessible (404)."""
     pass
 
-class RepoAccessError(Exception):
+class RepoAccessError(GitHubAPIError):
     """Raised when permissions are insufficient (non-rate-limit 403)."""
+    pass
+
+class GitHubAuthenticationError(GitHubAPIError):
+    """Raised when a token is expired, revoked, or invalid (401)."""
+    pass
+
+class GitHubValidationError(GitHubAPIError):
+    """Raised for malformed requests or semantic errors (422)."""
+    pass
+
+class GitHubConflictError(GitHubAPIError):
+    """Raised on state conflicts, like requesting commits on an empty repository (409)."""
     pass
 
 # ── Retry Logic ───────────────────────────────────────────────────────────────
@@ -100,6 +117,15 @@ def should_retry_httpx_error(exception: BaseException) -> bool:
     if isinstance(exception, RateLimitError):
         return True
     
+    if isinstance(
+        exception,
+        (RepoAccessError,RepoNotFoundError,GitHubAuthenticationError,GitHubValidationError,GitHubConflictError)
+    ):
+        return False
+    if isinstance(exception,GitHubAPIError):
+        if exception.status_code in (429,500,502,503,504):
+            return True
+    # 3. Retry 5xx Server Errors (Generic GitHubAPIError with status 500+)
     if isinstance(exception, httpx.HTTPStatusError):
         status = exception.response.status_code
         
@@ -120,11 +146,9 @@ def should_retry_httpx_error(exception: BaseException) -> bool:
                 "retry-after" in headers
             )
             return is_rate_limit
-            
-        # Do not retry on 401 (token expired), 404 (not found), or 422 (validation)
-        return False
+
         
-    # Retry on network timeouts, connection resets, or DNS issues
+    # 4. Retry transport/network failures (DNS drops, timeouts, connection resets)
     return isinstance(exception, httpx.RequestError)
 
 
@@ -161,6 +185,7 @@ class GitHubAuthManager:
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=retry(should_retry_httpx_error),
+        reraise=True,
     )
     async def get_installation_token(self, installation_id: int) -> str:
         """
@@ -228,7 +253,6 @@ class GitHubService:
     async def _get_as_app(self, path: str, installation_id: int, params: dict = None, return_header:bool = False) -> dict|tuple[dict, dict]:
         """Authenticated GET using the App Installation Token (Server-to-Server)."""
         token = await self.auth.get_installation_token(installation_id)
-        print("access token",token)
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
@@ -238,13 +262,13 @@ class GitHubService:
         return (data,response_header) if return_header else data
 
     async def _get_as_user(self, 
-                           path: str,
-                             user_oauth_token: str ,
-                             params: dict = None,
-                             return_header:bool = False,
-                             refresh_token:str = None,
-                             on_token_refresh: callable = None,  # Callback to save new tokens to your DB
-                             ) -> dict:
+        path: str,
+        user_oauth_token: str ,
+        params: dict = None,
+        return_header:bool = False,
+        refresh_token:str = None,
+        on_token_refresh: callable = None,  # Callback to save new tokens to your DB
+        ) -> dict:
         """Authenticated GET using the User's OAuth Token (User-to-Server)."""
         headers = {
             "Authorization": f"Bearer {user_oauth_token}",
@@ -254,7 +278,7 @@ class GitHubService:
         try:
             data,response_header =  await self._execute_request(path, headers, params)
             return (data,response_header) if return_header else data 
-        except httpx.HTTPStatusError as exc:
+        except GitHubAuthenticationError as exc:
         # Intercept 401 Unauthorized (Expired Token)
             if exc.response.status_code == 401 and refresh_token:
                 logger.info("User OAuth token expired. Attempting refresh...")
@@ -283,7 +307,10 @@ class GitHubService:
 
 # update : httpx timeouts configured globally or not.
     async def _execute_request(self, path: str, headers: dict, params: dict = None) -> dict:
-        """Internal method to handle rate limits and request execution."""
+        """
+        Internal wrapper: Handles HTTP execution, Rate Limit monitoring, 
+        and parsing raw HTTP Status Codes into our Custom Domain Exceptions
+        """
         resp = await self.client.get(path, headers=headers, params=params or {})
 
         remaining = int(resp.headers.get("X-RateLimit-Remaining", 9999))
@@ -291,9 +318,38 @@ class GitHubService:
             reset_at = int(resp.headers.get("X-RateLimit-Reset", 0))
             wait_seconds = max(0, reset_at - int(time.time()))
             logger.warning(f"GitHub rate limit buffer reached. Reset in {wait_seconds}s. Remaining: {remaining}")
-            raise RateLimitError(f"Rate limit buffer reached. {remaining} calls remaining.")
+            raise RateLimitError(f"Rate limit buffer reached. {remaining} calls remaining.",status_code=429)
 
-        resp.raise_for_status()
+        if resp.is_error:
+            status = resp.status_code
+
+            if status==401:
+                raise GitHubAuthenticationError(f"Unauthorized or Expired Token for: {path}", status_code=401)
+            elif status==404:
+                raise RepoNotFoundError(f"Resource not found: {path}", status_code=404)
+            elif status==409:
+                raise GitHubConflictError(f"Conflict at {path} (Repo might be empty)", status_code=409)
+            elif status==422:
+                raise GitHubValidationError(f"Validation failed for {path}: {resp.text}", status_code=422)
+            elif status==403:
+                # Disambiguate 403 Permission Denied vs 403 Secondary Rate Limit
+                resp_text = resp.text.lower()
+                headers_lower = {k.lower(): v for k, v in resp.headers.items()}
+
+                is_rate_limit = (
+                    "rate limit" in resp_text or 
+                    "secondary rate" in resp_text or
+                    headers_lower.get("x-ratelimit-remaining") == "0" or
+                    "retry-after" in headers_lower
+                )
+                if is_rate_limit:
+                    raise RateLimitError("GitHub API rate limit exceeded.", status_code=403)
+                else:
+                    raise RepoAccessError(f"Access forbidden to {path}. Check App Permissions.", status_code=403)
+
+            # Fallback for 5xx and unknown codes
+            raise GitHubAPIError(f"GitHub API returned {status} for {path}", status_code=status)
+        
         return resp.json() ,dict(resp.headers)
 
     # ── Rate limit  ──────────────────────────────────────────
@@ -337,7 +393,7 @@ class GitHubService:
         return token_data
 
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
     async def get_installed_repositories(
         self, installation_id: int,
         user_oauth_token: str = None,
@@ -388,13 +444,13 @@ class GitHubService:
 
     # ── App API Calls (Installation Token) ────────────────────────────────────
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
     async def get_installation_for_owner(self, endpoint:str ,installation_id:int):
         """installation for owner for installation cache class """
         data = await self._get_as_app(endpoint,installation_id)
         return data
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
     async def get_repo_branches(self, owner: str, repo: str, installation_id: int) -> list[str]:
         """
         Fetches branches of a repository using the App Installation token.
@@ -434,7 +490,6 @@ class GitHubService:
             is_fork=data["fork"],
             parent_info = parsed_parent,
             private=data["private"],
-            # Add this! Tells you if it is 'public', 'private', or 'internal'
             visibility=data.get("visibility", "private"),
             archived=data["archived"],
             is_empty=data["size"] == 0,
@@ -446,15 +501,19 @@ class GitHubService:
             topics=data.get("topics", []),
         )
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
     async def _get_root_file_list(self, owner: str, repo: str, branch: str, installation_id: int, params: dict = None) -> set[str]:
         """Returns the root file list as a set of paths."""
         if not branch:
             return set()
-        data = await self._get_as_app(f"/repos/{owner}/{repo}/git/trees/{branch}", installation_id, params)
-        return {entry["path"] for entry in data.get("tree", [])}
+        # Repositories can be empty or branches deleted, return empty set if 404 or 409
+        try:
+            data = await self._get_as_app(f"/repos/{owner}/{repo}/git/trees/{branch}", installation_id, params)
+            return {entry["path"] for entry in data.get("tree", [])}
+        except (RepoNotFoundError, GitHubConflictError):
+            return set()
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
     async def get_full_tree(self, owner: str, repo: str, sha: str, installation_id: int) -> list[TreeEntry]:
         data = await self._get_as_app(
             f"/repos/{owner}/{repo}/git/trees/{sha}",
@@ -473,7 +532,7 @@ class GitHubService:
             ) for entry in data.get("tree", [])
         ]
     
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
     async def get_live_head_sha(self, owner: str, repo: str, branch: str, installation_id: int) -> Optional[str]:
         """
         Fetches live head SHA for cache invalidation.
@@ -484,12 +543,11 @@ class GitHubService:
                 installation_id
             )
             return data.get("object", {}).get("sha")
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
+        except RepoNotFoundError:
                 return None
-            raise
+            
     
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
     async def get_commit_count(self, owner: str, repo: str, since_sha: str, branch: str, installation_id: int, max_count:int, params: dict = None) -> int:
         """Gets commit count since last sha to determine repo churn."""
         try:
@@ -500,14 +558,13 @@ class GitHubService:
             )
             return data.get("ahead_by", 0)
 
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code in (404, 422):
+        except (RepoNotFoundError,GitHubValidationError):
             # Base SHA not found — repo may have been force-pushed
-                return max_count  # Treat as fully stale
-            if e.response.status_code != 200:
-                return 0
+            return max_count  # Treat as fully stale
+        except GitHubAPIError:
+            return 0 
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
     async def get_latest_commit_date(self, owner: str, repo: str, branch: str, installation_id: int) -> Optional[str]:
         """
         Fetches the ISO-8601 date string of the most recent commit on a given branch.
@@ -525,12 +582,11 @@ class GitHubService:
                 return data[0].get("commit", {}).get("committer", {}).get("date")
             return None
             
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code in (404, 409): # 409 happens on empty repositories
-                return None
-            raise
+        except (RepoNotFoundError,GitHubConflictError):
+            # 404 missing branch, 409 empty repository
+            return None
         
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
     async def get_file_content(self, owner: str, repo: str, path: str, installation_id: int, params: dict = None) -> dict:
         """Fetches raw file dictionary payload from GitHub Contents API."""
         data = await self._get_as_app(
@@ -565,7 +621,9 @@ class GitHubService:
             # Clean and decode
             cleaned_b64 = content_b64.replace("\n", "").replace("\r", "")
             return base64.b64decode(cleaned_b64).decode("utf-8")
-            
+        
+        except (RepoNotFoundError, GitHubConflictError):
+            return None   
         except Exception as e:
             logger.warning(f"Failed to decode file {path}: {e}")
             return None
@@ -655,12 +713,12 @@ class InstallationCache:
                     "App installed on '%s' — installation_id=%s", owner, install_id
                 )
                 return install_id
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 404:
+            except RepoNotFoundError:
                     continue   # Not installed there, try next endpoint
+            except GitHubAPIError as e:
                 logger.warning(
                     "Unexpected status checking installation for '%s': %s",
-                    owner, e.response.status_code,
+                    owner, e.status_code,
                 )
         logger.info("App NOT installed on '%s'", owner)
         return None

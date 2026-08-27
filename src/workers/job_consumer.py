@@ -13,7 +13,7 @@ from src.core.database import get_system_transaction,create_pools , close_pools
 from src.core.config import get_settings
 from src.core.crypto import decrypt_token
 from src.workers.ingestion_worker import IngestionWorker, PermanentJobFailure, TransientJobFailure
-from src.services.microvm_client import MicroVMClient
+from src.services.microvm_client import MicroVMClient,MicroVMError
 from src.services.github import GitHubService
 from src.workers.utils.callback import _active_background_tasks,handle_task_completion
 from src.services.clone_strategy import CloneStrategySelector , RepoSizingInfo , CloneConfig
@@ -68,7 +68,8 @@ class TrustedOrchestrator:
         "PARSING_AST":        RepoStatus.MANIFESTING,
         "UPLOADING":          RepoStatus.MANIFESTING,
         "RECORDING_MANIFEST": RepoStatus.MANIFESTING,
-        "FAILED":             RepoStatus.FAILED
+        "FAILED":             RepoStatus.FAILED,
+        "RETRYING":           RepoStatus.RETRYING,
     }
 
     async def _update_job_phase(self, job_id: UUID, repo_id: UUID,phase: str, node_count: Optional[int]= None):
@@ -210,9 +211,18 @@ class TrustedOrchestrator:
                 async for event in self.microvm.stream_status(
                     endpoint, auth_token, timeout_seconds=600
                 ):
-                    await self._update_job_phase(job_id,repo_id=repo_id,phase=event.get("phase", "PROCESSING"))
-                    if event.get("phase") == "FAILED":
-                        raise RuntimeError(f"Sandbox error: {event.get('error')}")
+                    phase = event.get("phase","PROCESSING")
+
+                    if phase == "FAILED":
+                        error_msg = event.get("error","Unknow_sandbox_error")
+                        raise MicroVMError(
+                            f"Sandbox Execution Failed :{error_msg}",
+                            code="SandboxExecutionFailed",
+                            retryable=False,# Code parsing errors will not succeed on SQS retry
+                        )
+                    if phase!="VM_WORK_COMPLETED":
+                        await self._update_job_phase(job_id,repo_id=repo_id,phase=event.get("phase", "PROCESSING"))
+                   
  
             finally:
                 # Explicit termination is the normal path here — not the
@@ -236,10 +246,26 @@ class TrustedOrchestrator:
             logger.info("Job %s completed — %d nodes written", job_id, ast_nodes_written)
             logger.info("Job %s successfully completed and removed from queue.", job_id)
 
+        except MicroVMError as e:
+            # Structured log including code and retryable status
+            logger.error(
+                "Job %s failed with MicroVMError [code=%s, retryable=%s]: %s",
+                job_id, e.code, e.retryable, e,
+                extra={"job_id": job_id, "error_code": e.code, "retryable": e.retryable}
+            )
+            if e.retryable:
+                await self._update_job_phase(job_id, repo_id=repo_id, phase="RETRYING")
+                await self._mark_job_failed(job_id, repo_id, f"[{e.code}] {e}")
+
+            # Non-retryable errors are explicitly purged from SQS to avoid deadlocks
+            else:
+                await self._mark_job_failed(job_id, repo_id, error_code=e.code, error_message=str(e))
+                logger.warning("Deleting non-retryable job %s from SQS queue", job_id)
+                await sqs.delete_message(QueueUrl=self.queue_url, ReceiptHandle=receipt_handle)
+                
         except Exception as e:
             logger.exception("Failed to process job %s: %s", job_id, e)
-            await self._update_job_phase(job_id,repo_id=repo_id,phase="FAILED")
-            await self._mark_job_failed(job_id, repo_id, str(e))
+            await self._update_job_phase(job_id,repo_id=repo_id,phase="RETRYING")
             # Do NOT delete the SQS message; let visibility timeout expire for redrive.
 
         finally:
