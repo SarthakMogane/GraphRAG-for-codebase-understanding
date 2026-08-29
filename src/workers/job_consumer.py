@@ -83,17 +83,22 @@ class TrustedOrchestrator:
     async def _update_job_phase(self, job_id: UUID, repo_id: UUID,phase: str, node_count: Optional[int]= None):
         """Updates the central database directly from the Trusted Orchestrator."""
         async with get_system_transaction() as conn:
-            await conn.execute(
-                "UPDATE ingestion_jobs SET phase = $1, node_count = COALESCE ($2, node_count) WHERE id = $3",
+            status = await conn.execute(
+                """ 
+                    UPDATE ingestion_jobs SET
+                    phase = $1, node_count = COALESCE ($2, node_count) 
+                    WHERE id = $3 AND (phase IS DISTINCT FROM $1 OR node_count IS NOT NULL)
+                """,
                 phase, node_count, job_id
             )
-            repo_status = self._PHASE_TO_REPO_STATUS.get(phase)
-            if repo_status:
-                await conn.execute(
-                    "UPDATE repos SET index_status = $1 WHERE id = $2",
-                    repo_status.value, repo_id,
-                )
-            logger.info("Job %s transitioned to %s", job_id, phase)
+            if status!= "UPDATE 0":
+                repo_status = self._PHASE_TO_REPO_STATUS.get(phase)
+                if repo_status:
+                    await conn.execute(
+                        "UPDATE repos SET index_status = $1 WHERE id = $2",
+                        repo_status.value, repo_id,
+                    )
+                logger.info("Job %s transitioned to %s", job_id, phase)
     
     async def _already_terminal(self, job_id: UUID) -> bool:
         """
