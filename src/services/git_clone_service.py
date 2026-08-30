@@ -236,6 +236,35 @@ class GitCloneService:
             "Sparse checkout complete - materialized %d directories",len(dirs_to_include)
         )
 
+    async def init_submodule(
+            self,
+            repo_path:Path,
+            submodule_path:str,
+            home_dir:Path,
+            auth_token:str,
+            use_blob_filter:bool = False,
+            
+    ) -> None:
+        """
+        Initialize a single approved submodule with a shallow depth-1 clone.
+        Called individually for each approved submodule — never with --recursive.
+        """
+        extra = ["--filter=blob:none"] if use_blob_filter else []
+        auth_flag = self._auth_header_flag(auth_token=auth_token)
+        cmd = self._git_cmd(
+            *auth_flag,
+            "submodules","update"
+            "init",
+            "depth","1",
+            *extra,
+            "--",
+            submodule_path,
+        )
+        env = self._build_env(CloneConfig(),home_dir)
+        await self._run(cmd,cwd=repo_path,env=env)
+        logger.info("Submodule initialized: %s", submodule_path)
+
+
     def _verify_git_version(self) -> None:
         try:
             result = subprocess.run(["git","--version"],capture_output=True , text=str, timeout=5)
