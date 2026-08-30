@@ -253,9 +253,9 @@ class GitCloneService:
         auth_flag = self._auth_header_flag(auth_token=auth_token)
         cmd = self._git_cmd(
             *auth_flag,
-            "submodules","update"
-            "init",
-            "depth","1",
+            "submodule","update"
+            "--init",
+            "--depth","1",
             *extra,
             "--",
             submodule_path,
@@ -264,6 +264,57 @@ class GitCloneService:
         await self._run(cmd,cwd=repo_path,env=env)
         logger.info("Submodule initialized: %s", submodule_path)
 
+
+    async def init_submodule_parallel(
+        self,
+        repo_path:Path,
+        submodule_paths:list[str],
+        auth_token:str,
+        home_dir:Path,
+        use_blob_filter:bool = False,
+        jobs:int = None,
+    )-> None:
+        """
+        Initialize multiple approved submodules in parallel using --jobs.
+        Significantly faster than sequential initialization.
+ 
+        Args:
+            repo_path:        Parent repo working tree path
+            submodule_paths:  List of submodule paths to initialize
+            jobs:             Parallel job count (defaults to config value)
+            home_dir:         Build explicit environment
+            auth_token:       github token to access submodules
+            use_blob_filter: True for large submodules to avoid downloading blobs
+        """
+
+        if not submodule_paths:
+            return 
+
+        parallel = jobs or settings.SUBMODULE_PARALLEL_JOBS  #update move to job consumer directly .
+        extra = ["--filter=blob:none"] if use_blob_filter else []
+        auth_flag = self._auth_header_flag(auth_token=auth_token)
+        cmd = self._git_cmd(
+                *auth_flag,
+                "submodule","update",
+                "--init",
+                "depth","1",
+                *extra,
+                f"--jobs={parallel}"
+                "--",
+                *submodule_paths
+        )
+        env = self._build_env(CloneConfig(),home_dir)
+
+        await self._run(
+            cmd=cmd,
+            cwd=repo_path,
+            env=env,
+        )
+
+        logger.info(
+            "Initialized %d submodules in parallel (jobs=%d)",
+            len(submodule_paths), parallel
+        )
 
     def _verify_git_version(self) -> None:
         try:
