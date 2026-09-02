@@ -46,7 +46,17 @@ import httpx
 
 from src.core.config import get_settings
 from src.models.database import SubmoduleOutcome
-from src.services.github import GitHubService, InstallationCache
+from src.services.github import(
+    GitHubService,
+    InstallationCache,
+    GitHubAPIError,
+    GitHubAuthenticationError,
+    GitHubConflictError,
+    GitHubValidationError,
+    RateLimitError,
+    RepoAccessError,
+    RepoNotFoundError,
+)
 from src.services.pre_clone.types import MonorepoDetectionResult, SubProjectScore
 
 logger = logging.getLogger(__name__)
@@ -194,7 +204,7 @@ class DeepScout:
         root_task = asyncio.create_task(
             self.gh._get_root_file_list(owner, repo, branch, self.installation_id)
         )
-        metadata, root_files = await asyncio.gather(meta_task, root_task)
+        metadata, (root_files,pinned_shas,_,_) = await asyncio.gather(meta_task, root_task)
         self._api_calls += 2
 
         # ── Monorepo detection + Level 1 submodule scout in parallel ──────────
@@ -332,7 +342,12 @@ class DeepScout:
 
         nodes = []
         for i, result in enumerate(raw):
-            if isinstance(result, Exception):
+            if isinstance(result,Exception):
+                # 1. Let global system failures bubble out of DeepScout to FastAPI/Router
+                if isinstance(result,(RateLimitError,GitHubAuthenticationError,httpx.RequestError)):
+                    return result
+                
+                # 2. Treat unexpected node-level exceptions as INACCESSIBLE
                 logger.warning("Scout error for '%s': %s", entries[i].path, result)
                 nodes.append(SubmoduleNode(
                     path=entries[i].path, name=entries[i].name,
@@ -398,10 +413,10 @@ class DeepScout:
         self._api_calls += 1
         try:
             meta = await self.gh.get_repo_metadata(owner, repo, self.installation_id)
-        except httpx.HTTPStatusError as e:
+        except (RepoNotFoundError,RepoAccessError,GitHubConflictError,GitHubValidationError) as e:
             outcome = (
                 SubmoduleOutcome.BROKEN_REFERENCE
-                if e.response.status_code == 404
+                if isinstance(e,RepoNotFoundError)
                 else SubmoduleOutcome.INACCESSIBLE
             )
             return SubmoduleNode(
@@ -411,9 +426,26 @@ class DeepScout:
                 outcome=outcome, is_private=None, depth=depth,
                 auto_selected=False, user_can_toggle=depth == 1,
                 action_required=False, action_label=None, action_url=None,
-                skip_reason=f"GitHub API {e.response.status_code}",
+                skip_reason=f"Submodules : {e}",
             )
 
+        except GitHubAPIError as e:
+        # Generic catch-all for remaining non-transient 4xx client errors
+            logger.warning("Unexpected non-retryable API error on %s/%s: %s", owner, repo, e)
+            return SubmoduleNode(
+                path=entry.path,
+                name=entry.name,
+                resolved_owner=owner,
+                resolved_repo=repo,
+                resolved_url=base_url,
+                outcome=SubmoduleOutcome.INACCESSIBLE,
+                is_private=None,
+                depth=depth,
+                auto_selected=False,
+                user_can_toggle=False,
+                skip_reason=f"API scouting error: {e}",
+            )
+        
         sub_branch = meta.default_branch
 
         # ── Public → always skip ──────────────────────────────────────────────
@@ -434,7 +466,7 @@ class DeepScout:
         install_id = await self.install_cache.get(owner)
 
         if install_id is None:
-            app_slug = getattr(settings, "GITHUB_APP_SLUG", "your-app")
+            app_slug = getattr(settings, "GITHUB_APP_SLUG", "your-app") #need update here 
             return SubmoduleNode(
                 path=entry.path, name=entry.name,
                 resolved_owner=owner, resolved_repo=repo,
@@ -470,10 +502,10 @@ class DeepScout:
         # ── Fetch root files then run mono detection, size, nested scout
         # all three in parallel ────────────────────────────────────────────────
         self._api_calls += 1
-        sub_root_files = await self.gh._get_root_file_list(
+        sub_root_files,_,_,_ = await self.gh._get_root_file_list(
             owner, repo, sub_branch, self.installation_id
         )
-
+        
         mono_task = asyncio.create_task(
             self._detect_monorepo(owner, repo, sub_branch, sub_root_files)
         )
