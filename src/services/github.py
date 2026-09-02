@@ -116,21 +116,17 @@ def should_retry_httpx_error(exception: BaseException) -> bool:
     # Always retry our custom RateLimitError
     if isinstance(exception, RateLimitError):
         return True
-    
+    # Never retry explicit 4xx business/permission errors
     if isinstance(
         exception,
         (RepoAccessError,RepoNotFoundError,GitHubAuthenticationError,GitHubValidationError,GitHubConflictError)
     ):
         return False
+    # Retry transient server errors
     if isinstance(exception,GitHubAPIError):
-        if exception.status_code in (429,500,502,503,504):
-            return True
-    # 3. Retry 5xx Server Errors (Generic GitHubAPIError with status 500+)
-    if isinstance(exception, httpx.HTTPStatusError):
-        status = exception.response.status_code
         
-        # Retry on standard server hiccups and standard rate limits
-        if status in (429, 500, 502, 503, 504):
+        status = exception.response.status_code
+        if status in (429,500,502,503,504):
             return True
             
         # Handle the ambiguous 403
@@ -462,7 +458,7 @@ class GitHubService:
 
     # ── App API Calls (Installation Token) ────────────────────────────────────
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), retry=retry(should_retry_httpx_error),reraise = True )
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise = True )
     async def get_repo_metadata(self, owner: str, repo: str, installation_id: int) -> RepoMetadata:
         data = await self._get_as_app(f"/repos/{owner}/{repo}", installation_id)
 
@@ -478,7 +474,7 @@ class GitHubService:
             )
 
         branch = data.get("default_branch")
-        root_files = await self._get_root_file_list(owner, repo, branch, installation_id)
+        root_files,_ = await self._get_root_file_list(owner, repo, branch, installation_id)
         
         return RepoMetadata(
             owner=data["owner"]["login"],
@@ -502,17 +498,27 @@ class GitHubService:
         )
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
-    async def _get_root_file_list(self, owner: str, repo: str, branch: str, installation_id: int, params: dict = None) -> set[str]:
+    async def _get_root_file_list(self, owner: str, repo: str, branch_or_sha: str, installation_id: int, params: dict = None) -> set[str]:
         """Returns the root file list as a set of paths."""
-        if not branch:
+        if not branch_or_sha:
             return set()
         # Repositories can be empty or branches deleted, return empty set if 404 or 409
         try:
-            data = await self._get_as_app(f"/repos/{owner}/{repo}/git/trees/{branch}", installation_id, params)
-            return {entry["path"] for entry in data.get("tree", [])}
+            data = await self._get_as_app(f"/repos/{owner}/{repo}/git/trees/{branch_or_sha}", installation_id, params)
+            raw_entries = data.get("tree",[])
+            is_truncated = data.get("truncated",False)
+            root_files = {entry["path"] for entry in raw_entries}
+            pinned_shas = {
+                entry["path"]:entry["sha"]
+                for entry in raw_entries
+                if entry.get("type")=="commit" or entry.get("mode") == "160000"
+            }
+            return root_files,pinned_shas,is_truncated,raw_entries
+        
         except (RepoNotFoundError, GitHubConflictError):
             return set()
 
+    
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
     async def get_full_tree(self, owner: str, repo: str, sha: str, installation_id: int) -> list[TreeEntry]:
         data = await self._get_as_app(
