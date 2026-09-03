@@ -40,8 +40,18 @@ from src.services.pre_clone.types import (
     MonorepoDetectionResult, MonorepoTooling,
     SubProjectDecision, SubProjectScore,
 )
-from src.services.github import GitHubService , TreeEntry
-
+from src.services.github import(
+    GitHubService,
+    TreeEntry,
+    InstallationCache,
+    GitHubAPIError,
+    GitHubAuthenticationError,
+    GitHubConflictError,
+    GitHubValidationError,
+    RateLimitError,
+    RepoAccessError,
+    RepoNotFoundError,
+)
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -125,7 +135,8 @@ class MonorepoDetector:
         owner: str,
         repo: str,
         default_branch: str,
-        root_files: set[str],          # Root-level filenames (already fetched)
+        root_files: set[str],         # <-- Only files at the root level (e.g., {"package.json", "README.md"})
+        full_tree: list[str],         # <-- Every file path in the repo (e.g., ["package.json", "packages/api/index.js"])
         recent_commit_paths: list[str],
         installation_id: str # Files touched in recent commits (for churn)
 
@@ -142,13 +153,13 @@ class MonorepoDetector:
         warnings :list[str] = [] 
         # ── Stage 1: Tooling detection ─────────────────────────────────────
         tooling, detected_via, raw_subprojects = await self._stage1_tooling_detection(
-            owner, repo, default_branch, root_files , installation_id, warnings
+            owner, repo, default_branch, root_files, full_tree, installation_id
         )
 
         if not raw_subprojects:
             # ── Stage 2: Structural inference ─────────────────────────────
             raw_subprojects, tooling, detected_via = await self._stage2_structural_inference(
-                owner, repo, default_branch, root_files , installation_id , warnings
+                owner, repo, default_branch, root_files, full_tree, installation_id
             )
 
         # 3. Unmanaged Folder Detection (Scripts/Notebooks)
@@ -172,7 +183,6 @@ class MonorepoDetector:
         dep_graph = self._stage3_build_dependency_graph(raw_subprojects)
 
         # ── Stage 4: Scoring ───────────────────────────────────────────────
-        full_tree = await self._fetch_full_tree_safe(owner, repo, default_branch,installation_id,warnings=warnings)
         scores = await self._stage4_score_subprojects(
             raw_subprojects=raw_subprojects,
             dep_graph=dep_graph,
@@ -204,7 +214,7 @@ class MonorepoDetector:
     # ─────────────────────────────────────────────────────────────────────────
 
     async def _stage1_tooling_detection(
-        self, owner: str, repo: str, branch: str, root_files: set[str],installation_id:int
+        self, owner: str, repo: str, branch: str, root_files: set[str], full_tree:list[str], installation_id:int
     ) -> tuple[MonorepoTooling, Optional[str], list[RawSubProject]]:
         """
         Read tooling config files to get an authoritative sub-project list.
@@ -219,7 +229,7 @@ class MonorepoDetector:
                     continue
 
                 subprojects = await self._parse_tooling_config(
-                    tooling, filename, content, owner, repo, branch, root_files
+                    tooling, filename, content, owner, repo, branch, root_files,full_tree
                 )
                 if subprojects:
                     logger.info(
@@ -266,21 +276,22 @@ class MonorepoDetector:
         content: str,
         owner: str, repo: str, branch: str,
         root_files: set[str],
+        full_tree:list[str],
     ) -> list[RawSubProject]:
         """Dispatch to the right parser for each tooling type."""
         try:
             if tooling == MonorepoTooling.NX:
-                return await self._parse_nx(content, owner, repo, branch)
+                return await self._parse_nx(content, owner, repo, branch,full_tree)
             elif tooling == MonorepoTooling.TURBOREPO:
-                return await self._parse_turborepo(content, owner, repo, branch, root_files)
+                return await self._parse_turborepo(content, owner, repo, branch, root_files,full_tree)
             elif tooling == MonorepoTooling.RUSH:
                 return self._parse_rush(content)
             elif tooling == MonorepoTooling.LERNA:
-                return await self._parse_lerna(content, owner, repo, branch)
+                return await self._parse_lerna(content, full_tree)
             elif tooling == MonorepoTooling.PNPM:
-                return await self._parse_pnpm_workspace(content, owner, repo, branch)
+                return await self._parse_pnpm_workspace(content, full_tree)
             elif tooling == MonorepoTooling.BAZEL:
-                return await self._parse_bazel(owner, repo, branch)
+                return await self._parse_bazel(full_tree)
         except Exception as e:
             logger.warning("Failed to parse %s config: %s", filename, e)
         return []
@@ -288,7 +299,7 @@ class MonorepoDetector:
     # ── Nx Parser ─────────────────────────────────────────────────────────────
 
     async def _parse_nx(
-        self, nx_json_content: str, owner: str, repo: str, branch: str,installation_id:int , warnings:list[str]
+        self, nx_json_content: str, owner: str, repo: str, branch: str,full_tree:list[str],installation_id:int , warnings:list[str]
     ) -> list[RawSubProject]:
         """
         Nx workspace: read project.json files from each project directory.
@@ -309,10 +320,10 @@ class MonorepoDetector:
         libs_dir = layout.get("libsDir", "libs")
 
         # Fetch the tree to find all project.json files
-        tree = await self._fetch_full_tree_safe(owner, repo, branch ,installation_id , warnings)
+        
         project_json_paths = [
-            e["path"] for e in tree
-            if e.path.endswith("/project.json") or e.path == "project.json"
+            path for path in full_tree
+            if path.endswith("/project.json") or path == "project.json"
         ]
 
         for proj_path in project_json_paths:
@@ -355,8 +366,10 @@ class MonorepoDetector:
     # ── Turborepo Parser ──────────────────────────────────────────────────────
 
     async def _parse_turborepo(
-        self, turbo_json_content: str, owner: str, repo: str, branch: str,
-        root_files: set[str], installation_id:list[str]
+        self, owner: str, repo: str, branch: str,
+        root_files: set[str],
+        full_tree:list[str] ,
+        installation_id:list[str]
     ) -> list[RawSubProject]:
         """
         Turborepo reads workspace definitions from the root package.json.
@@ -367,7 +380,7 @@ class MonorepoDetector:
             pkg_content = await self.gh.get_decoded_file_content(owner, repo, branch, "package.json",installation_id)
             if pkg_content:
                 subprojects, _ = await self._parse_npm_workspaces(
-                    pkg_content, owner, repo, branch
+                    pkg_content, full_tree
                 )
                 return subprojects
         return []
@@ -403,7 +416,7 @@ class MonorepoDetector:
     # ── Lerna Parser ──────────────────────────────────────────────────────────
 
     async def _parse_lerna(
-        self, lerna_json_content: str, owner: str, repo: str, branch: str ,installation_id:int , warnings:list[str]
+        self, lerna_json_content: str, full_tree:list[str]
     ) -> list[RawSubProject]:
         """
         Lerna: lerna.json has "packages" glob patterns.
@@ -415,12 +428,12 @@ class MonorepoDetector:
             return []
 
         patterns = data.get("packages", ["packages/*"])
-        return await self._expand_glob_patterns(patterns, owner, repo, branch ,installation_id=installation_id, warnings=warnings)
+        return await self._expand_glob_patterns(patterns, full_tree)
 
     # ── pnpm Workspaces Parser ────────────────────────────────────────────────
 
     async def _parse_pnpm_workspace(
-        self, yaml_content: str, owner: str, repo: str, branch: str,installation_id:int , warnings:list[str]
+        self, yaml_content: str,full_tree:list[str]
     ) -> list[RawSubProject]:
         """
         pnpm-workspace.yaml has a "packages" list of glob patterns.
@@ -431,12 +444,12 @@ class MonorepoDetector:
         except yaml.YAMLError:
             return []
 
-        return await self._expand_glob_patterns(patterns, owner, repo, branch ,installation_id=installation_id, warnings=warnings)
+        return await self._expand_glob_patterns(patterns,full_tree)
 
     # ── npm/Yarn Workspaces Parser ────────────────────────────────────────────
 
     async def _parse_npm_workspaces(
-        self, pkg_json_content: str, owner: str, repo: str, branch: str ,installation_id:int, warnings:list[str]
+        self, pkg_json_content: str,full_tree:list[str]
     ) -> tuple[list[RawSubProject], MonorepoTooling]:
         """
         npm/Yarn workspaces: root package.json has a "workspaces" field.
@@ -459,7 +472,7 @@ class MonorepoDetector:
         else:
             return [], MonorepoTooling.NONE
 
-        subprojects = await self._expand_glob_patterns(patterns, owner, repo, branch,installation_id=installation_id, warnings=warnings)
+        subprojects = await self._expand_glob_patterns(patterns,full_tree)
 
         # Determine whether this is npm or yarn by checking for yarn.lock
         tooling = MonorepoTooling.YARN  # default — most common for workspaces
@@ -468,7 +481,7 @@ class MonorepoDetector:
     # ── Cargo Workspace Parser ────────────────────────────────────────────────
 
     async def _parse_cargo_workspace(
-        self, cargo_toml_content: str, owner: str, repo: str, branch: str ,installation_id:int ,warnings:list[str]
+        self, cargo_toml_content: str, full_tree:list[str]
     ) -> list[RawSubProject]:
         """
         Rust Cargo workspaces: root Cargo.toml has [workspace] section with members list.
@@ -494,7 +507,7 @@ class MonorepoDetector:
         if not members:
             return []
 
-        return await self._expand_glob_patterns(members, owner, repo, branch,installation_id=installation_id, warnings=warnings)
+        return await self._expand_glob_patterns(members, full_tree)
 
     # ── Gradle Settings Parser ────────────────────────────────────────────────
 
@@ -518,19 +531,18 @@ class MonorepoDetector:
     # ── Bazel Parser ──────────────────────────────────────────────────────────
 
     async def _parse_bazel(
-        self, owner: str, repo: str, branch: str ,installation_id:int , warnings:list[str]
+        self, full_tree:list[str]
     ) -> list[RawSubProject]:
         """
         Bazel: every directory with a BUILD or BUILD.bazel file is a build target.
         We find them by scanning the tree.
         """
-        tree = await self._fetch_full_tree_safe(owner, repo, branch,installation_id, warnings)
         build_dirs = set()
-        for entry in tree:
-            if entry.path in ("BUILD", "BUILD.bazel") or \
-               entry.path.endswith("/BUILD") or \
-               entry.path.endswith("/BUILD.bazel"):
-                parent = str(Path(entry.path).parent)
+        for entry_path in full_tree:
+            if entry_path in ("BUILD", "BUILD.bazel") or \
+               entry_path.endswith("/BUILD") or \
+               entry_path.endswith("/BUILD.bazel"):
+                parent = str(Path(entry_path).parent)
                 if parent != ".":
                     build_dirs.add(parent)
 
@@ -544,7 +556,7 @@ class MonorepoDetector:
     # ─────────────────────────────────────────────────────────────────────────
 
     async def _stage2_structural_inference(
-        self, owner: str, repo: str, branch: str, root_files: set[str] ,installation_id, warnings
+        self, owner: str, repo: str, branch: str, root_files: set[str],full_tree:list[str], installation_id
     ) -> tuple[list[RawSubProject], MonorepoTooling, Optional[str]]:
         """
         When no tooling config is found, infer monorepo structure from
@@ -562,16 +574,12 @@ class MonorepoDetector:
         if not candidate_dirs:
             return [], MonorepoTooling.NONE, None
 
-        # Fetch the tree to find manifest files inside candidate dirs
-        tree = await self._fetch_full_tree_safe(owner, repo, branch,installation_id,warnings)
-        tree_paths = {e.path for e in tree}
-
         subprojects = []
         for top_dir in candidate_dirs:
             # Find all subdirs of this top_dir that have a package manifest
             for manifest in SUBPROJECT_MANIFESTS:
                 # Pattern: {top_dir}/{subproject}/{manifest}
-                for entry_path in tree_paths:
+                for entry_path in full_tree:
                     parts = entry_path.split("/")
                     if (len(parts) == 3 and
                         parts[0] == top_dir and
@@ -596,7 +604,9 @@ class MonorepoDetector:
         return subprojects, MonorepoTooling.INFERRED, "directory_structure"
 
     async def _detect_unmanaged_folders(self, owner: str, repo: str, branch: str, root_files: set[str]) -> list[RawSubProject]:
-        """Detect folders like 'scripts' or 'notebooks' that lack manifests but hold code."""
+        """ Detect folders like 'scripts' or 'notebooks' that lack manifests but hold code.
+            not included if not indexed file patterns
+        """
         TARGET_DIRS = {"scripts", "notebooks", "experiments", "tools", "infrastructure"}
         candidate_dirs = root_files & TARGET_DIRS
         
@@ -660,25 +670,11 @@ class MonorepoDetector:
             if tier == FileTier.TIER1_SOURCE
         }
 
-        # Pre-compute: for each subproject path, how many files live under it
-        # This is O(subprojects × tree_size) — acceptable for typical sizes
-        tree_by_path = {}
-        for entry in full_tree:
-            if entry["type"] == "blob":
-                top = entry["path"].split("/")[0] if "/" in entry["path"] else entry["path"]
-                tree_by_path.setdefault(entry["path"][:entry["path"].rfind("/")], []).append(entry)
-
         # Pre-compute dependent count: how many projects depend ON each project
         reverse_dep_count: dict[str, int] = {}
         for deps in dep_graph.values():
             for dep in deps:
                 reverse_dep_count[dep] = reverse_dep_count.get(dep, 0) + 1
-
-        # Pre-compute recent commit activity per top-level dir
-        recent_dir_counts: dict[str, int] = {}
-        for path in recent_commit_paths:
-            top_dir = path.split("/")[0]
-            recent_dir_counts[top_dir] = recent_dir_counts.get(top_dir, 0) + 1
 
         scores = []
         for sp in raw_subprojects:
@@ -687,33 +683,30 @@ class MonorepoDetector:
                 name=sp.declared_name or sp.name,
             )
 
-            # ── Signal 1: Source file count ────────────────────────────────
             sp_prefix = sp.path.rstrip("/") + "/"
+            # Filter file paths belonging to this subproject
+            sub_paths = [p for p in full_tree if p.startswith(sp_prefix) or p == sp.path]
+            # ── Signal 1: Source file count ────────────────────────────────
             source_files = [
-                e for e in full_tree
-                if e["path"].startswith(sp_prefix)
-                and e["type"] == "blob"
-                and any(e["path"].endswith(ext) for ext in source_extensions)
+                p for p in sub_paths
+                if any(p.endswith(ext) for ext in source_extensions)
             ]
             score.source_file_count = len(source_files)
             score.source_byte_count = sum((e.get("size") or 0) for e in source_files)
 
             # ── Signal 2: Entry point presence ────────────────────────────
             entry_point_files = [
-                e for e in full_tree
-                if e.path.startswith(sp_prefix)
+                p for p in sub_paths
                 # Safely extract the filename without the extension
-                and (e["path"].split("/")[-1].split(".")[0].lower() in ENTRY_POINT_STEMS)
-                and e["type"] == "blob"
+                if (p.split("/")[-1].split(".")[0].lower() in ENTRY_POINT_STEMS)
             ]
             score.has_entry_point = len(entry_point_files) > 0
             score.is_deployable = score.has_entry_point
 
             # ── Signal 3: README presence ──────────────────────────────────
             readme_files = [
-                e for e in full_tree
-                if e["path"].startswith(sp_prefix)
-                and Path(e["path"]).name.upper().startswith("README")
+               p for p in sub_paths
+                if Path(p).name.upper().startswith("README")
             ]
             score.has_own_readme = len(readme_files) > 0
 
@@ -723,7 +716,6 @@ class MonorepoDetector:
 
             # ── Signal 5: Recent commit activity ──────────────────────────
             # Count commits that specifically touch files INSIDE this sub-project
-            sp_prefix = sp.path.rstrip("/") + "/"
             commits_in_project = sum(
                 1 for path in recent_commit_paths 
                 if path.startswith(sp_prefix)
@@ -752,19 +744,14 @@ class MonorepoDetector:
         # Normalise source file count (log scale — large repos shouldn't dominate)
         import math
         file_norm = min(1.0, math.log1p(score.source_file_count) / math.log1p(500))
-
         # Entry point: binary 0 or 1
         entry_norm = 1.0 if score.has_entry_point else 0.0
-
         # Dependent count: normalised against theoretical max (n-1)
         dep_norm = min(1.0, score.dependent_count / max(n - 1, 1))
-
         # Recent commits: normalise against 50 commits as "very active"
         commit_norm = min(1.0, score.recent_commit_count / 50)
-
         # README: binary
         readme_norm = 1.0 if score.has_own_readme else 0.0
-
         # Depth penalty: shallower = better
         # depth 1 = 1.0, depth 2 = 0.7, depth 3 = 0.4, depth 4+ = 0.1
         depth_norm = max(0.1, 1.0 - (score.depth - 1) * 0.3)
@@ -811,114 +798,53 @@ class MonorepoDetector:
     # ─────────────────────────────────────────────────────────────────────────
 
 
-    async def _fetch_full_tree_safe(self, owner: str, repo: str, branch: str, installation_id:int,warnings:list[str]) -> list[dict]:
+    async def _fetch_full_tree_safe(self, owner: str, repo: str, branch: str, installation_id:int,warnings:list[str]) -> tuple[set[str], dict[str, str]]:
         """Safely fetch the tree, handling GitHub's 100k truncation limit."""
         try:
-            data = await self.gh._get_root_file_list(
+            all_files_path, pinned_shas, is_truncated,raw_entries = await self.gh._get_root_file_list(
                 owner,repo,branch,
                 installation_id,
                 params={"recursive": "1"}
             )
-            tree = data.get("tree", [])
 
             # CRITICAL FIX: If truncated, the repo is massive. We cannot rely on recursive=1.
             # We must gracefully fallback to fetching only the first-level directories.
-            if data.get("truncated") is True:
+            if is_truncated:
                 logger.warning(
                     f"Repo {owner}/{repo} tree truncated (>100k files). "
                     f"Falling back to top-level scan."
                 )
-                return await self._fetch_top_level_trees(owner, repo, branch, tree,installation_id,warnings)
-            
-            return tree
-        
-        except Exception as e:
-            logger.error(f"Failed to fetch full tree for {owner}/{repo}: {e}")
-            return []
-
-    async def _fetch_top_level_trees(
-        self, owner: str, repo: str, branch: str, partial_tree: list[dict], installation_id: int,warnings: list[str]
-    ) -> list[dict]:
-        """
-        Fallback method: Fetch only the contents of root-level directories to save API calls.
-        Runs concurrently to minimize latency on massive repos.
-        """
-        top_level_dirs = [
-            e for e in partial_tree 
-            if e.get("type") == "tree" and "/" not in e.get("path", "")
-        ]
-        
-        full_tree = partial_tree.copy()
-        
-        async def fetch_single_dir(dir_entry: dict) -> list[dict]:
-            try:
-                # FIX Use the tree SHA to fetch the sub-directory via the official service
-                # (The old code used dir_entry["url"] with a rogue httpx client)
-                data = await self.gh._get_as_app(
-                    f"/repos/{owner}/{repo}/git/trees/{dir_entry['sha']}",
-                    installation_id,
-                    params={"recursive": "1"}
-                )
-                sub_tree = data.get("tree", [])
-                
-                # Prepend the root directory path to the nested files
-                for e in sub_tree:
-                    e["path"] = f"{dir_entry['path']}/{e['path']}"
-                    
-                return sub_tree
-            except Exception as e:
-                logger.error(f"GitHub API failure on {dir_entry.get('path')}: {e}")
-                folder_name = dir_entry.get('path')
                 warnings.append(
-                    f"GitHub failed to load the contents of '/{folder_name}'. "
-                    f"Any packages inside this directory won't appear below."
+                f"Repository '{owner}/{repo}' tree exceeds GitHub's 100k limit. "
+                f"Executed top-level directory scan."
                 )
-                return []
+                # Fallback path: Isolate top-level directories at root
+                all_files_path, pinned_shas, _, raw_entries = await self.gh._get_root_file_list(
+                    owner, repo, branch,
+                    installation_id,
+                    params=None  # NOT recursive
+                )
+                top_level_dirs = [
+                    entry for entry in raw_entries
+                    if entry.get("type") == "tree" 
+                ]
 
-        # FIX : Fetch all top-level directories concurrently to save time
-        results = await asyncio.gather(*(fetch_single_dir(d) for d in top_level_dirs))
-        
-        for res in results:
-            full_tree.extend(res)
-            
-        return full_tree
-    
-    async def _expand_glob_patterns(
-        self, patterns: list[str], owner: str, repo: str, branch: str, installation_id: int,warnings: list[str]
-    ) -> list[RawSubProject]:
-        """
-        Expand glob patterns (like "packages/*") against the actual repo tree.
-        Returns RawSubProject for each matching directory that has a package manifest.
-        """
-    
-        tree = await self._fetch_full_tree_safe(owner, repo, branch, installation_id,warnings=warnings)
-        
-        tree_dirs = {
-            str(Path(e["path"]).parent)
-            for e in tree
-            # Safely use .get() since this is now a dictionary
-            if e.type == "blob" and Path(e.path).name in SUBPROJECT_MANIFESTS
-        }
-
-        subprojects = []
-        for pattern in patterns:
-            # Normalize pattern: remove trailing /**
-            clean_pattern = pattern.rstrip("/**").rstrip("/*")
-            for dir_path in tree_dirs:
-                if fnmatch.fnmatch(dir_path, clean_pattern) or \
-                   fnmatch.fnmatch(dir_path, pattern):
-                    subprojects.append(RawSubProject(
-                        path=dir_path,
-                        name=Path(dir_path).name,
-                        manifest_file="workspace_config",
-                    ))
-
-        # Deduplicate
-        seen = set()
-        unique = []
-        for sp in subprojects:
-            if sp.path not in seen:
-                seen.add(sp.path)
-                unique.append(sp)
+                if not top_level_dirs:
+                    return all_files_path, pinned_shas
                 
-        return unique
+                merged_files, merged_sha = await self._fetch_top_level_trees(owner, repo, branch, top_level_dirs,installation_id,warnings)
+                all_files_path.update(merged_files)
+                pinned_shas.update(merged_sha)
+
+            return all_files_path,pinned_shas
+        
+        except (GitHubAuthenticationError, RateLimitError,RepoAccessError,RepoNotFoundError):
+            raise
+        except Exception as e:
+            logger.error(f"Failed to fetch tree manifest for {owner}/{repo}: {e}")
+            warnings.append(
+                f"Failed to retrieve complete file manifest for '{owner}/{repo}'."
+            )
+            return set(), {}
+
+    
