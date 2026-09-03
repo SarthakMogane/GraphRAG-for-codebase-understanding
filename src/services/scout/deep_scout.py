@@ -196,27 +196,39 @@ class DeepScout:
         """
         import time
         start = time.monotonic()
-
+        all_warnings = []
         # ── Parent metadata + root files in parallel ──────────────────────────
         meta_task = asyncio.create_task(
             self.gh.get_repo_metadata(owner, repo, self.installation_id)
         )
-        root_task = asyncio.create_task(
-            self.gh._get_root_file_list(owner, repo, branch, self.installation_id)
+        tree_task = asyncio.create_task(
+            self._fetch_full_tree_safe(self.gh,owner, repo, branch, self.installation_id,warnings=all_warnings)
         )
-        metadata, (root_files,pinned_shas,_,_) = await asyncio.gather(meta_task, root_task)
+        metadata, (all_file_paths,pinned_shas,_,_) = await asyncio.gather(meta_task, tree_task)
         self._api_calls += 2
+        # ── 1. Derive True Root Files (paths without a '/') ──────────────
+        root_files = {path for path in all_file_paths if "/" not in path}
+        # ── 2. Convert all paths to a list/set for the Monorepo Detector ──
+        # (Pass list or set depending on how your parsers expect it)
+        full_tree_paths = list(all_file_paths)
 
         # ── Monorepo detection + Level 1 submodule scout in parallel ──────────
         mono_task = asyncio.create_task(
-            self._detect_monorepo(owner, repo, branch, root_files)
+            self._detect_monorepo(
+                owner,
+                repo,
+                branch, 
+                root_files, #true root files 
+                full_tree_paths,
+                self.installation_id,
+                all_warnings)
         )
         sub_task = asyncio.create_task(
             self._scout_submodules(owner, repo, branch, root_files, depth=1)
         )
         mono_result, submodule_nodes = await asyncio.gather(mono_task, sub_task)
 
-        all_warnings = []
+        
         
         # 2. Extract warnings from the monorepo detector
         if mono_result and mono_result.warnings:
@@ -502,12 +514,14 @@ class DeepScout:
         # ── Fetch root files then run mono detection, size, nested scout
         # all three in parallel ────────────────────────────────────────────────
         self._api_calls += 1
-        sub_root_files,_,_,_ = await self.gh._get_root_file_list(
+        sub_all_file_paths,_ = await self._fetch_full_tree_safe(
             owner, repo, sub_branch, self.installation_id
         )
-        
+        sub_root_files = {path for path in sub_all_file_paths if "/" not in path}
+        sub_full_tree_paths = list(sub_all_file_paths)
+
         mono_task = asyncio.create_task(
-            self._detect_monorepo(owner, repo, sub_branch, sub_root_files)
+            self._detect_monorepo(owner, repo, sub_branch, sub_root_files,sub_full_tree_paths,self.installation_id )
         )
         size_task = asyncio.create_task(
             self._estimate_size(owner, repo, sub_branch)
@@ -586,6 +600,7 @@ class DeepScout:
         repo: str,
         branch: str,
         root_files: set[str],
+        full_tree: list[str]
     ) -> Optional[MonorepoDetectionResult]:
         """
         Detect monorepo using GitHub API only. No clone, no disk.
@@ -619,6 +634,7 @@ class DeepScout:
                 repo=repo,
                 default_branch=branch,
                 root_files=root_files,
+                full_tree=full_tree,
                 recent_commit_paths=[],
                 installation_id=self.installation_id
             )
