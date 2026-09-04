@@ -498,7 +498,8 @@ class GitHubService:
         )
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
-    async def _get_root_file_list(self, owner: str, repo: str, branch_or_sha: str, installation_id: int, params: dict = None) -> set[str]:
+    async def _get_root_file_list(self, owner: str, repo: str, branch_or_sha: str, installation_id: int, params: dict = None
+        ) -> tuple[set[str],dict[str,str],bool , list[dict]]:
         """Returns the root file list as a set of paths."""
         if not branch_or_sha:
             return set()
@@ -507,16 +508,16 @@ class GitHubService:
             data = await self._get_as_app(f"/repos/{owner}/{repo}/git/trees/{branch_or_sha}", installation_id, params)
             raw_entries = data.get("tree",[])
             is_truncated = data.get("truncated",False)
-            root_files = {entry["path"] for entry in raw_entries}
+            all_files_path = {entry["path"] for entry in raw_entries}
             pinned_shas = {
                 entry["path"]:entry["sha"]
                 for entry in raw_entries
                 if entry.get("type")=="commit" or entry.get("mode") == "160000"
             }
-            return root_files,pinned_shas,is_truncated,raw_entries
+            return all_files_path,pinned_shas,is_truncated,raw_entries
         
         except (RepoNotFoundError, GitHubConflictError):
-            return set()
+            return set(),{},False,[]
 
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
@@ -591,6 +592,40 @@ class GitHubService:
         except (RepoNotFoundError,GitHubConflictError):
             # 404 missing branch, 409 empty repository
             return None
+
+    @retry(stop=stop_after_attempt(3),wait=wait_exponential(min=1,max=5),retry=retry(should_retry_httpx_error),reraise=True)
+    async def get_recent_commit_file_paths(self, owner: str, repo: str,installation_id: int, limit: int = 50) -> list[str]:
+        """Fetch file paths changed in recent commits via GitHub API."""
+        try:
+            # GET /repos/{owner}/{repo}/commits?per_page=50
+            commits = await self._get_as_app(
+                        f"/repos/{owner}/{repo}/commits", 
+                        installation_id=installation_id,
+                        params={"per_page": limit}
+                        )
+            if not isinstance(commits, list):
+                return []
+            modified_paths:set[str] = set()
+            for commit in commits:
+                if not isinstance(commit, dict):
+                    continue
+                # Note: Fetching detailed files for each commit can consume rate limits.
+                # If grabbing list of commits, extract files array if present:
+                for file_entry in commit.get("files", []):
+                    if filename := file_entry.get("filename"):
+                        modified_paths.append(file_entry["filename"])
+                    
+            return list(modified_paths)
+        except (GitHubAuthenticationError, RateLimitError, RepoAccessError, RepoNotFoundError):
+        # Re-raise explicit permission or hard system errors if parent needs to abort
+            raise
+        except Exception as e:
+            # Graceful fallback for optional signals (e.g. 422 Unprocessable Entity for empty repos)
+            logger.warning(
+                f"Failed to retrieve commit activity for {owner}/{repo}: {e}. "
+                f"Proceeding without commit churn signal."
+            )
+            return []  
         
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
     async def get_file_content(self, owner: str, repo: str, path: str, installation_id: int, params: dict = None) -> dict:
