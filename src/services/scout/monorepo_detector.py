@@ -138,6 +138,7 @@ class MonorepoDetector:
         root_files: set[str],         # <-- Only files at the root level (e.g., {"package.json", "README.md"})
         full_tree: list[str],         # <-- Every file path in the repo (e.g., ["package.json", "packages/api/index.js"])
         recent_commit_paths: list[str],
+        file_sizes:dict[str,int],
         installation_id: str # Files touched in recent commits (for churn)
 
     ) -> MonorepoDetectionResult:
@@ -660,6 +661,7 @@ class MonorepoDetector:
         dep_graph: dict[str, list[str]],
         full_tree: list[TreeEntry],
         recent_commit_paths: list[str],
+        file_sizes:dict[str, int],
     ) -> list[SubProjectScore]:
         """
         Score each sub-project on 6 dimensions.
@@ -692,7 +694,8 @@ class MonorepoDetector:
                 if any(p.endswith(ext) for ext in source_extensions)
             ]
             score.source_file_count = len(source_files)
-            score.source_byte_count = sum((e.get("size") or 0) for e in source_files)
+            score.subproject_byte_count =sum(file_sizes.get(p, 0) for p in sub_paths)
+
 
             # ── Signal 2: Entry point presence ────────────────────────────
             entry_point_files = [
@@ -798,53 +801,41 @@ class MonorepoDetector:
     # ─────────────────────────────────────────────────────────────────────────
 
 
-    async def _fetch_full_tree_safe(self, owner: str, repo: str, branch: str, installation_id:int,warnings:list[str]) -> tuple[set[str], dict[str, str]]:
-        """Safely fetch the tree, handling GitHub's 100k truncation limit."""
-        try:
-            all_files_path, pinned_shas, is_truncated,raw_entries = await self.gh._get_root_file_list(
-                owner,repo,branch,
-                installation_id,
-                params={"recursive": "1"}
-            )
+    async def _expand_glob_patterns(
+        self, patterns: list[str], full_tree:list[str]
+    ) -> list[RawSubProject]:
+        """
+        Expand glob patterns (like "packages/*") against the actual repo tree.
+        Returns RawSubProject for each matching directory that has a package manifest.
+        """
+    
+        tree_dirs = {
+            str(Path(path).parent)
+            for path in full_tree
+            if Path(path).name in SUBPROJECT_MANIFESTS
+        }
 
-            # CRITICAL FIX: If truncated, the repo is massive. We cannot rely on recursive=1.
-            # We must gracefully fallback to fetching only the first-level directories.
-            if is_truncated:
-                logger.warning(
-                    f"Repo {owner}/{repo} tree truncated (>100k files). "
-                    f"Falling back to top-level scan."
-                )
-                warnings.append(
-                f"Repository '{owner}/{repo}' tree exceeds GitHub's 100k limit. "
-                f"Executed top-level directory scan."
-                )
-                # Fallback path: Isolate top-level directories at root
-                all_files_path, pinned_shas, _, raw_entries = await self.gh._get_root_file_list(
-                    owner, repo, branch,
-                    installation_id,
-                    params=None  # NOT recursive
-                )
-                top_level_dirs = [
-                    entry for entry in raw_entries
-                    if entry.get("type") == "tree" 
-                ]
+        subprojects = []
+        for pattern in patterns:
+            # Normalize pattern: remove trailing /**
+            clean_pattern = pattern.rstrip("/**").rstrip("/*")
+            for dir_path in tree_dirs:
+                if fnmatch.fnmatch(dir_path, clean_pattern) or \
+                    fnmatch.fnmatch(dir_path, pattern):
+                    subprojects.append(RawSubProject(
+                        path=dir_path,
+                        name=Path(dir_path).name,
+                        manifest_file="workspace_config",
+                    ))
 
-                if not top_level_dirs:
-                    return all_files_path, pinned_shas
+        # Deduplicate
+        seen = set()
+        unique = []
+        for sp in subprojects:
+            if sp.path not in seen:
+                seen.add(sp.path)
+                unique.append(sp)
                 
-                merged_files, merged_sha = await self._fetch_top_level_trees(owner, repo, branch, top_level_dirs,installation_id,warnings)
-                all_files_path.update(merged_files)
-                pinned_shas.update(merged_sha)
-
-            return all_files_path,pinned_shas
-        
-        except (GitHubAuthenticationError, RateLimitError,RepoAccessError,RepoNotFoundError):
-            raise
-        except Exception as e:
-            logger.error(f"Failed to fetch tree manifest for {owner}/{repo}: {e}")
-            warnings.append(
-                f"Failed to retrieve complete file manifest for '{owner}/{repo}'."
-            )
-            return set(), {}
+        return unique
 
     

@@ -41,7 +41,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
-
+from pathlib import Path
 import httpx
 
 from src.core.config import get_settings
@@ -202,14 +202,13 @@ class DeepScout:
             self.gh.get_repo_metadata(owner, repo, self.installation_id)
         )
         tree_task = asyncio.create_task(
-            self._fetch_full_tree_safe(self.gh,owner, repo, branch, self.installation_id,warnings=all_warnings)
+            self._fetch_full_tree_safe(owner, repo, branch, self.installation_id,warnings=all_warnings)
         )
-        metadata, (all_file_paths,pinned_shas,_,_) = await asyncio.gather(meta_task, tree_task)
+        metadata, (all_file_paths,pinned_shas,file_sizes) = await asyncio.gather(meta_task, tree_task)
         self._api_calls += 2
-        # ── 1. Derive True Root Files (paths without a '/') ──────────────
+       
         root_files = {path for path in all_file_paths if "/" not in path}
-        # ── 2. Convert all paths to a list/set for the Monorepo Detector ──
-        # (Pass list or set depending on how your parsers expect it)
+        
         full_tree_paths = list(all_file_paths)
 
         # ── Monorepo detection + Level 1 submodule scout in parallel ──────────
@@ -221,18 +220,20 @@ class DeepScout:
                 root_files, #true root files 
                 full_tree_paths,
                 self.installation_id,
-                all_warnings)
+                file_sizes=file_sizes
+                )
         )
         sub_task = asyncio.create_task(
             self._scout_submodules(owner, repo, branch, root_files, depth=1)
         )
-        mono_result, submodule_nodes = await asyncio.gather(mono_task, sub_task)
+        mono_result, (submodule_nodes,submodule_warnings) = await asyncio.gather(mono_task, sub_task)
 
-        
-        
-        # 2. Extract warnings from the monorepo detector
+        # 2. Extract warnings from the monorepo detector and submodules.
         if mono_result and mono_result.warnings:
             all_warnings.extend(mono_result.warnings)
+
+        if submodule_warnings:
+            all_warnings.extend(submodule_warnings)
 
         subproject_nodes = self._build_subproject_nodes(mono_result)
         edges = self._build_dependency_edges(owner, repo, submodule_nodes, mono_result)
@@ -290,7 +291,7 @@ class DeepScout:
         branch: str,
         root_files: set[str],
         depth: int,
-    ) -> list[SubmoduleNode]:
+    ) -> tuple[list[SubmoduleNode],list[str]]:
         """
         Fetch and classify all submodules for a repo via API.
         All sibling submodules are classified concurrently.
@@ -352,7 +353,8 @@ class DeepScout:
         ]
         raw = await asyncio.gather(*tasks, return_exceptions=True)
 
-        nodes = []
+        submodule_nodes = []
+        all_sub_warnings = []
         for i, result in enumerate(raw):
             if isinstance(result,Exception):
                 # 1. Let global system failures bubble out of DeepScout to FastAPI/Router
@@ -361,7 +363,7 @@ class DeepScout:
                 
                 # 2. Treat unexpected node-level exceptions as INACCESSIBLE
                 logger.warning("Scout error for '%s': %s", entries[i].path, result)
-                nodes.append(SubmoduleNode(
+                submodule_nodes.append(SubmoduleNode(
                     path=entries[i].path, name=entries[i].name,
                     resolved_owner=None, resolved_repo=None,
                     resolved_url=None, pinned_sha=None,
@@ -372,15 +374,17 @@ class DeepScout:
                     skip_reason=f"Scout error: {result}",
                 ))
             else:
-                nodes.append(result)
+                node, local_warnings = result
+                submodule_nodes.append(result)
+                all_sub_warnings.extend(local_warnings)
 
-        return nodes
+        return submodule_nodes,all_sub_warnings
 
     async def _classify_submodule(
         self,
         entry,
         depth: int,
-    ) -> SubmoduleNode:
+    ) -> tuple[SubmoduleNode,list[str]]:
         """
         Classify one .gitmodules entry. Full pipeline:
           resolve URL → depth gate → fetch metadata → public check →
@@ -388,6 +392,9 @@ class DeepScout:
           monorepo detection + size estimation + nested scout (parallel) →
           determine outcome + auto_selected
         """
+        sub_warnings: list[str] = []
+        sub_owner = entry.get("owner")
+        sub_repo = entry.get("repo")
         # ── Resolve URL ───────────────────────────────────────────────────────
         owner = entry.owner
         repo = entry.repo
@@ -514,14 +521,14 @@ class DeepScout:
         # ── Fetch root files then run mono detection, size, nested scout
         # all three in parallel ────────────────────────────────────────────────
         self._api_calls += 1
-        sub_all_file_paths,_ = await self._fetch_full_tree_safe(
-            owner, repo, sub_branch, self.installation_id
+        sub_all_file_paths,pinned_sha,files_sizes = await self._fetch_full_tree_safe(
+            owner, repo, sub_branch, self.installation_id ,warnings=sub_warnings
         )
         sub_root_files = {path for path in sub_all_file_paths if "/" not in path}
         sub_full_tree_paths = list(sub_all_file_paths)
 
         mono_task = asyncio.create_task(
-            self._detect_monorepo(owner, repo, sub_branch, sub_root_files,sub_full_tree_paths,self.installation_id )
+            self._detect_monorepo(owner, repo, sub_branch, sub_root_files,sub_full_tree_paths,self.installation_id ,file_sizes=files_sizes)
         )
         size_task = asyncio.create_task(
             self._estimate_size(owner, repo, sub_branch)
@@ -588,7 +595,8 @@ class DeepScout:
             nested_submodules=nested_nodes,
             complexity_band=band,
             estimated_source_files=file_count,
-        )
+        ),
+        sub_warnings
 
     # ─────────────────────────────────────────────────────────────────────────
     # Monorepo detection
@@ -600,7 +608,8 @@ class DeepScout:
         repo: str,
         branch: str,
         root_files: set[str],
-        full_tree: list[str]
+        full_tree: list[str],
+        file_sizes: dict[str,int]
     ) -> Optional[MonorepoDetectionResult]:
         """
         Detect monorepo using GitHub API only. No clone, no disk.
@@ -636,6 +645,7 @@ class DeepScout:
                 root_files=root_files,
                 full_tree=full_tree,
                 recent_commit_paths=[],
+                file_sizes=file_sizes,
                 installation_id=self.installation_id
             )
             self._api_calls += 3
@@ -831,3 +841,110 @@ class DeepScout:
             flat.append(node)
             flat.extend(node.nested_submodules)
         return flat
+
+    async def _fetch_full_tree_safe(self, owner: str, repo: str, branch: str, installation_id:int,warnings:list[str]) -> tuple[set[str], dict[str, str]]:
+            """Safely fetch the tree, handling GitHub's 100k truncation limit."""
+            try:
+                all_files_path, pinned_shas, is_truncated,raw_entries = await self.gh._get_root_file_list(
+                    owner,repo,branch,
+                    installation_id,
+                    params={"recursive": "1"}
+                )
+    
+                # CRITICAL FIX: If truncated, the repo is massive. We cannot rely on recursive=1.
+                # We must gracefully fallback to fetching only the first-level directories.
+                if is_truncated:
+                    logger.warning(
+                        f"Repo {owner}/{repo} tree truncated (>100k files). "
+                        f"Falling back to top-level scan."
+                    )
+                    warnings.append(
+                    f"Repository '{owner}/{repo}' tree exceeds GitHub's 100k limit. "
+                    f"Executed top-level directory scan."
+                    )
+                    # Fallback path: Isolate top-level directories at root
+                    all_files_path, pinned_shas, _, raw_entries = await self.gh._get_root_file_list(
+                        owner, repo, branch,
+                        installation_id,
+                        params=None  # NOT recursive
+                    )
+                    top_level_dirs = [
+                        entry for entry in raw_entries
+                        if entry.get("type") == "tree" 
+                    ]
+    
+                    if not top_level_dirs:
+                        return all_files_path, pinned_shas
+                    
+                    merged_files, merged_sha = await self._fetch_top_level_trees(owner, repo, branch, top_level_dirs,installation_id,warnings)
+                    all_files_path.update(merged_files)
+                    pinned_shas.update(merged_sha)
+    
+                return all_files_path,pinned_shas
+            
+            except (GitHubAuthenticationError, RateLimitError,RepoAccessError,RepoNotFoundError):
+                raise
+            except Exception as e:
+                logger.error(f"Failed to fetch tree manifest for {owner}/{repo}: {e}")
+                warnings.append(
+                    f"Failed to retrieve complete file manifest for '{owner}/{repo}'."
+                )
+                return set(), {}
+            
+    async def _fetch_top_level_trees(
+            self, owner: str, repo: str, branch: str, top_level_dirs: list[dict], installation_id: int,warnings: list[str]
+        ) -> tuple[set[str], dict[str, str]]:
+            """
+            Fallback method: Fetch only the contents of root-level directories to save API calls.
+            Runs concurrently to minimize latency on massive repos.
+            """
+            merged_files: set[str] = set()
+            merged_shas: dict[str, str] = {}
+            
+            async def fetch_single_dir(dir_entry: dict) -> tuple[set[str],dict[str,str]]:
+                dir_path = dir_entry["path"]
+                dir_sha = dir_entry["sha"]
+    
+                try:
+                    # FIX Use the tree SHA to fetch the sub-directory via the official service
+                    # (The old code used dir_entry["url"] with a rogue httpx client)
+                    sub_files,sub_shas,is_truncated,_ = await self.gh._get_root_file_list(
+                        owner, repo , dir_sha, installation_id , params={"recursive":1}
+                    )
+                    if is_truncated:
+                        logger.warning(f"Nested directory '{dir_path}' truncated (>100k files).")
+                        warnings.append(
+                            f"Directory '/{dir_path}' is massive (>100k files). "
+                            f"Analysis for this specific folder is incomplete."
+                        )
+                    # Re-align relative paths to repo root (e.g., "web/package.json" -> "apps/web/package.json")
+                    prepended_files = {f"{dir_path}/{f}" for f in sub_files}
+                    prepended_shas = {f"{dir_path}/{k}": v for k, v in sub_shas.items()}
+                    return prepended_files, prepended_shas
+    
+                except (GitHubAuthenticationError,RateLimitError,RepoNotFoundError,RepoAccessError):
+                    raise
+                except Exception as e:
+                    logger.error(f"GitHub API failure on {dir_entry.get('path')}: {e}")
+                    folder_name = dir_entry.get('path')
+                    warnings.append(
+                        f"GitHub failed to load the contents of '/{folder_name}'. "
+                        f"Any packages inside this directory won't appear below."
+                    )
+                    return set(),{}
+    
+            # FIX : Fetch all top-level directories concurrently to save time
+            results = await asyncio.gather(*(fetch_single_dir(d) for d in top_level_dirs),return_exceptions=True)
+            
+            for res in results:
+                if isinstance(res, (GitHubAuthenticationError, RateLimitError)):
+                    raise res
+                elif isinstance(res, Exception):
+                    logger.warning("Directory tree fetch failed: %s", res)
+                else:
+                    sub_f, sub_s = res
+                    merged_files.update(sub_f)
+                    merged_shas.update(sub_s)
+    
+            return merged_files, merged_shas
+        
