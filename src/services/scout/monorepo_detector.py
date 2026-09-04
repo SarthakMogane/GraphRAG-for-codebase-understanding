@@ -189,6 +189,7 @@ class MonorepoDetector:
             dep_graph=dep_graph,
             full_tree=full_tree,
             recent_commit_paths=recent_commit_paths,
+            file_sizes=file_sizes
         )
 
         # ── Stage 5: Decision threshold ────────────────────────────────────

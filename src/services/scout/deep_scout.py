@@ -201,10 +201,13 @@ class DeepScout:
         meta_task = asyncio.create_task(
             self.gh.get_repo_metadata(owner, repo, self.installation_id)
         )
+        commit_task = asyncio.create_task(
+            self.gh.get_recent_commit_file_paths(owner, repo,self.installation_id, limit=50)
+        )
         tree_task = asyncio.create_task(
             self._fetch_full_tree_safe(owner, repo, branch, self.installation_id,warnings=all_warnings)
         )
-        metadata, (all_file_paths,pinned_shas,file_sizes) = await asyncio.gather(meta_task, tree_task)
+        metadata, (all_file_paths,pinned_shas,file_sizes),recent_commit_paths = await asyncio.gather(meta_task, tree_task,commit_task)
         self._api_calls += 2
        
         root_files = {path for path in all_file_paths if "/" not in path}
@@ -219,8 +222,9 @@ class DeepScout:
                 branch, 
                 root_files, #true root files 
                 full_tree_paths,
-                self.installation_id,
-                file_sizes=file_sizes
+                recent_commit_paths,
+                file_sizes=file_sizes,
+                installation_id = self.installation_id
                 )
         )
         sub_task = asyncio.create_task(
@@ -393,8 +397,7 @@ class DeepScout:
           determine outcome + auto_selected
         """
         sub_warnings: list[str] = []
-        sub_owner = entry.get("owner")
-        sub_repo = entry.get("repo")
+        
         # ── Resolve URL ───────────────────────────────────────────────────────
         owner = entry.owner
         repo = entry.repo
@@ -528,7 +531,13 @@ class DeepScout:
         sub_full_tree_paths = list(sub_all_file_paths)
 
         mono_task = asyncio.create_task(
-            self._detect_monorepo(owner, repo, sub_branch, sub_root_files,sub_full_tree_paths,self.installation_id ,file_sizes=files_sizes)
+            self._detect_monorepo(
+                owner, repo, sub_branch,
+                sub_root_files,sub_full_tree_paths,
+                recent_commit_paths=[],
+                file_sizes=files_sizes,
+                installation_id=self.installation_id
+                )
         )
         size_task = asyncio.create_task(
             self._estimate_size(owner, repo, sub_branch)
@@ -609,7 +618,9 @@ class DeepScout:
         branch: str,
         root_files: set[str],
         full_tree: list[str],
-        file_sizes: dict[str,int]
+        recent_commit_paths:list[str],
+        file_sizes: dict[str,int],
+        installation_id:int,
     ) -> Optional[MonorepoDetectionResult]:
         """
         Detect monorepo using GitHub API only. No clone, no disk.
@@ -644,9 +655,9 @@ class DeepScout:
                 default_branch=branch,
                 root_files=root_files,
                 full_tree=full_tree,
-                recent_commit_paths=[],
+                recent_commit_paths=recent_commit_paths,
                 file_sizes=file_sizes,
-                installation_id=self.installation_id
+                installation_id=installation_id
             )
             self._api_calls += 3
             return result if result.is_monorepo else None
