@@ -542,19 +542,10 @@ class DeepScout:
         size_task = asyncio.create_task(
             self._estimate_size(owner, repo, sub_branch)
         )
-        if depth < settings.SUBMODULE_MAX_DEPTH:
-            nested_task = asyncio.create_task(
-                self._scout_submodules(
-                    owner, repo, sub_branch, sub_root_files, depth + 1
-                )
-            )
-        else:
-            async def _empty():
-                return []
-            nested_task = asyncio.create_task(_empty())  
+         
 
-        mono_result, size_result, nested_nodes = await asyncio.gather(
-            mono_task, size_task, nested_task
+        mono_result, size_result = await asyncio.gather(
+            mono_task, size_task
         )
 
         file_count, byte_count, band = size_result
