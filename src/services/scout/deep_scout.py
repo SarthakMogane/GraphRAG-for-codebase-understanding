@@ -302,8 +302,8 @@ class DeepScout:
         Uses GitHubService.get_file_content() — no raw httpx calls.
         """
         if ".gitmodules" not in root_files:
-            return []
-
+            return [],[]
+        
         gitmodules_content = await self.gh.get_decoded_file_content(
             owner=owner, 
             repo=repo, 
@@ -314,56 +314,30 @@ class DeepScout:
         self._api_calls += 1
 
         if not gitmodules_content:
-            return []
-          
+            return [],[]
+         
         # Use the production GitmodulesParser (configparser-based, size-limited)
-        from src.services.scout.submodule_decision_tree import GitmodulesParser
+        from src.services.scout.submodule_decision_tree import GitmodulesParser,GitmodulesEntry
         if len(gitmodules_content.encode()) > GitmodulesParser.MAX_GITMODULES_SIZE:
             logger.warning(f".gitmodules too large for {owner}/{repo}. Skipping.")
-            return [] 
+            return [],[]
         
-        entries = GitmodulesParser().parse(gitmodules_content)
-
-        if not entries.is_valid_url:
-            return SubmoduleNode(
-                path=entries.path,
-                name=entries.name,
-
-                resolved_owner=None,
-                resolved_repo=None,
-                resolved_url=None,
-                pinned_sha=None,
-
-                outcome=SubmoduleOutcome.INACCESSIBLE,
-                is_private=None,
-                depth=depth,
-
-                auto_selected=False,
-                user_can_toggle=(depth == 1),
-
-                action_required=False,
-                action_label=None,
-                action_url=None,
-
-                skip_reason=(
-                    entries.url_error
-                    or f"Invalid GitHub URL: {entries.raw_url}"
-                ),
-            )
+        entries:GitmodulesEntry = GitmodulesParser().parse(gitmodules_content)
 
         tasks = [
-            asyncio.create_task(self._classify_submodule(entry, depth))
+            asyncio.create_task(self._classify_submodule(entry,owner, depth))
             for entry in entries
         ]
         raw = await asyncio.gather(*tasks, return_exceptions=True)
 
-        submodule_nodes = []
-        all_sub_warnings = []
+        submodule_nodes:list[SubmoduleNode] = []
+        all_sub_warnings:list[str] = []
+
         for i, result in enumerate(raw):
             if isinstance(result,Exception):
                 # 1. Let global system failures bubble out of DeepScout to FastAPI/Router
                 if isinstance(result,(RateLimitError,GitHubAuthenticationError,httpx.RequestError)):
-                    return result
+                    raise result
                 
                 # 2. Treat unexpected node-level exceptions as INACCESSIBLE
                 logger.warning("Scout error for '%s': %s", entries[i].path, result)
@@ -379,7 +353,7 @@ class DeepScout:
                 ))
             else:
                 node, local_warnings = result
-                submodule_nodes.append(result)
+                submodule_nodes.append(node)
                 all_sub_warnings.extend(local_warnings)
 
         return submodule_nodes,all_sub_warnings
@@ -387,6 +361,7 @@ class DeepScout:
     async def _classify_submodule(
         self,
         entry,
+        parent_owner,
         depth: int,
     ) -> tuple[SubmoduleNode,list[str]]:
         """
@@ -401,17 +376,44 @@ class DeepScout:
         # ── Resolve URL ───────────────────────────────────────────────────────
         owner = entry.owner
         repo = entry.repo
-        if not owner:
+        if not entry.is_valid_url or owner or not repo:
             return SubmoduleNode(
-                path=entry.path, name=entry.name,
-                resolved_owner=None, resolved_repo=None,
-                resolved_url=None, pinned_sha=None,
+                path=entry.path,
+                name=entry.name,
+                resolved_owner=None,
+                resolved_repo=None,
+                resolved_url=None,
+                pinned_sha=None,
                 outcome=SubmoduleOutcome.INACCESSIBLE,
-                is_private=None, depth=depth,
-                auto_selected=False, user_can_toggle=depth == 1,
+                is_private=None,
+                depth=depth,
+                auto_selected=False,
+                user_can_toggle=False,
                 action_required=False, action_label=None, action_url=None,
                 skip_reason=f"Cannot resolve URL: {entry.raw_url}",
-            )
+            ),sub_warnings
+
+        if owner.casefold() != parent_owner.casefold():
+            return SubmoduleNode(
+                path=entry.path,
+                name=entry.name,
+                resolved_owner=owner,
+                resolved_repo=repo,
+                resolved_url=entry.normalized_url,
+                pinned_sha=None,
+                outcome=SubmoduleOutcome.EXTERNAL_OWNER,
+                is_private=None,
+                depth=depth,
+                auto_selected=False,
+                user_can_toggle=False,
+                action_required=False,
+                action_label=None,
+                action_url=None,
+                skip_reason=(
+                    f"Submodule owner '{owner}' does not match "
+                    f"parent owner '{parent_owner}'"
+                ),
+            ),sub_warnings
 
         repo_key = f"{owner}/{repo}"
         base_url = entry.normalized_url or (
@@ -436,20 +438,32 @@ class DeepScout:
         try:
             meta = await self.gh.get_repo_metadata(owner, repo, self.installation_id)
         except (RepoNotFoundError,RepoAccessError,GitHubConflictError,GitHubValidationError) as e:
-            outcome = (
-                SubmoduleOutcome.BROKEN_REFERENCE
-                if isinstance(e,RepoNotFoundError)
-                else SubmoduleOutcome.INACCESSIBLE
-            )
+            outcome = SubmoduleOutcome.INACCESSIBLE
+            action_required = False
+            action_label = None
+            action_url = None
+
+            if isinstance(e,RepoNotFoundError):
+                outcome = SubmoduleOutcome.BROKEN_REFERENCE
+            elif isinstance(e,RepoAccessError):
+                outcome = SubmoduleOutcome.ACCESS_REQUIRED
+                action_required = True
+                action_label = f"Grant Access to '{owner}'"
+                action_url = (
+                    f"https://github.com/apps/{settings.GITHUB_APP_SLUG}/installations/new"
+                    f"?suggested_target_id={owner}"
+                )
+            
             return SubmoduleNode(
                 path=entry.path, name=entry.name,
                 resolved_owner=owner, resolved_repo=repo,
                 resolved_url=base_url, pinned_sha=None,
                 outcome=outcome, is_private=None, depth=depth,
-                auto_selected=False, user_can_toggle=depth == 1,
-                action_required=False, action_label=None, action_url=None,
+                auto_selected=False,
+                user_can_toggle=False,
+                action_required=action_required, action_label=action_label, action_url=action_url,
                 skip_reason=f"Submodules : {e}",
-            )
+            ),sub_warnings
 
         except GitHubAPIError as e:
         # Generic catch-all for remaining non-transient 4xx client errors
@@ -466,7 +480,7 @@ class DeepScout:
                 auto_selected=False,
                 user_can_toggle=False,
                 skip_reason=f"API scouting error: {e}",
-            )
+            ),sub_warnings
         
         sub_branch = meta.default_branch
 
@@ -481,30 +495,7 @@ class DeepScout:
                 auto_selected=False, user_can_toggle=False,
                 action_required=False, action_label=None, action_url=None,
                 skip_reason="Public OSS repository — not indexed by policy",
-            )
-
-        # ── Private → check GitHub App installation ───────────────────────────
-        # InstallationCache makes this 1 API call per org, not per submodule
-        install_id = await self.install_cache.get(owner)
-
-        if install_id is None:
-            app_slug = getattr(settings, "GITHUB_APP_SLUG", "your-app") #need update here 
-            return SubmoduleNode(
-                path=entry.path, name=entry.name,
-                resolved_owner=owner, resolved_repo=repo,
-                resolved_url=base_url, pinned_sha=None,
-                outcome=SubmoduleOutcome.INSTALL_REQUIRED,
-                is_private=True, depth=depth,
-                auto_selected=False,
-                user_can_toggle=False,
-                action_required=True,
-                action_label=f"Grant Access to '{owner}'",
-                action_url=(
-                    f"https://github.com/apps/{app_slug}/installations/new"
-                    f"?suggested_target_id={owner}"
-                ),
-                skip_reason=f"GitHub App not installed on '{owner}'",
-            )
+            ),sub_warnings
 
         # ── Already indexed → cross-link ──────────────────────────────────────
         if repo_key in self.already_indexed:
@@ -519,7 +510,7 @@ class DeepScout:
                 action_required=False, action_label=None, action_url=None,
                 skip_reason="Already indexed — will cross-link wikis",
                 linked_repo_id=self.already_indexed[repo_key], # upDATE high security needed . 
-            )
+            ),sub_warnings
 
         # ── Fetch root files then run mono detection, size, nested scout
         # all three in parallel ────────────────────────────────────────────────
@@ -592,11 +583,10 @@ class DeepScout:
                 mono_result.tooling.value if is_mono and mono_result else None
             ),
             subprojects=self._build_subproject_nodes(mono_result),
-            nested_submodules=nested_nodes,
+            nested_submodules=[],
             complexity_band=band,
             estimated_source_files=file_count,
-        ),
-        sub_warnings
+        ),sub_warnings
 
     # ─────────────────────────────────────────────────────────────────────────
     # Monorepo detection
