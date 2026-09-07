@@ -535,11 +535,12 @@ class DeepScout:
         )
          
 
-        mono_result, size_result = await asyncio.gather(
-            mono_task, size_task
-        )
+        mono_result = await mono_task
 
-        file_count, byte_count, band = size_result
+        file_count, byte_count, band = self._estimate_size(
+            sub_all_file_paths,
+            files_sizes,
+        )
         is_mono = mono_result.is_monorepo if mono_result else False
 
         # ── Determine outcome and auto_selected ───────────────────────────────
@@ -653,16 +654,13 @@ class DeepScout:
     # ─────────────────────────────────────────────────────────────────────────
 
     async def _estimate_size(
-        self, owner: str, repo: str, branch: str
+        self, file_paths, file_sizes
     ) -> tuple[int, int, str]:
         """
         Returns (source_file_count, source_byte_count, complexity_band).
         Uses GitHubService.get_full_tree() — no content download, paths+sizes only.
         """
         try:
-            tree = await self.gh.get_full_tree(owner, repo, branch, self.installation_id)
-            self._api_calls += 1
-
             from src.services.pre_clone.file_filter import LANGUAGE_MAP, FileTier
             source_exts = {
                 ext for ext, (_, tier) in LANGUAGE_MAP.items()
@@ -671,12 +669,11 @@ class DeepScout:
 
             count = 0
             total_bytes = 0
-            for entry in tree:
-                if entry.type == "blob":
-                    ext = "." + entry.path.rsplit(".", 1)[-1] if "." in entry.path else ""
+            for path in file_paths:
+                    ext = "." + path.rsplit(".", 1)[-1] if "." in path else ""
                     if ext.lower() in source_exts:
                         count += 1
-                        total_bytes += entry.size or 0
+                        total_bytes += file_sizes.get(path,0)
 
             if count < 500 or total_bytes < 500_000:
                 band = "small"
@@ -834,10 +831,10 @@ class DeepScout:
             flat.extend(node.nested_submodules)
         return flat
 
-    async def _fetch_full_tree_safe(self, owner: str, repo: str, branch: str, installation_id:int,warnings:list[str]) -> tuple[set[str], dict[str, str]]:
+    async def _fetch_full_tree_safe(self, owner: str, repo: str, branch: str, installation_id:int,warnings:list[str]) -> tuple[set[str], dict[str, str],dict[str, str]]:
             """Safely fetch the tree, handling GitHub's 100k truncation limit."""
             try:
-                all_files_path, pinned_shas, is_truncated,raw_entries = await self.gh._get_root_file_list(
+                all_files_path, pinned_shas, is_truncated,raw_entries,file_sizes= await self.gh._get_root_file_list(
                     owner,repo,branch,
                     installation_id,
                     params={"recursive": "1"}
@@ -866,13 +863,14 @@ class DeepScout:
                     ]
     
                     if not top_level_dirs:
-                        return all_files_path, pinned_shas
+                        return all_files_path, pinned_shas,file_sizes
                     
-                    merged_files, merged_sha = await self._fetch_top_level_trees(owner, repo, branch, top_level_dirs,installation_id,warnings)
+                    merged_files, merged_sha,merged_sizes = await self._fetch_top_level_trees(owner, repo, branch, top_level_dirs,installation_id,warnings)
                     all_files_path.update(merged_files)
                     pinned_shas.update(merged_sha)
+                    file_sizes.update(merged_sizes)
     
-                return all_files_path,pinned_shas
+                return all_files_path,pinned_shas,file_sizes
             
             except (GitHubAuthenticationError, RateLimitError,RepoAccessError,RepoNotFoundError):
                 raise
@@ -881,26 +879,27 @@ class DeepScout:
                 warnings.append(
                     f"Failed to retrieve complete file manifest for '{owner}/{repo}'."
                 )
-                return set(), {}
+                return set(), {}, {}
             
     async def _fetch_top_level_trees(
             self, owner: str, repo: str, branch: str, top_level_dirs: list[dict], installation_id: int,warnings: list[str]
-        ) -> tuple[set[str], dict[str, str]]:
+        ) -> tuple[set[str], dict[str, str],dict[str,int]]:
             """
             Fallback method: Fetch only the contents of root-level directories to save API calls.
             Runs concurrently to minimize latency on massive repos.
             """
             merged_files: set[str] = set()
             merged_shas: dict[str, str] = {}
+            merged_sizes: dict[str,int] = {}
             
-            async def fetch_single_dir(dir_entry: dict) -> tuple[set[str],dict[str,str]]:
+            async def fetch_single_dir(dir_entry: dict) -> tuple[set[str],dict[str,str],dict[str,str]]:
                 dir_path = dir_entry["path"]
                 dir_sha = dir_entry["sha"]
     
                 try:
                     # FIX Use the tree SHA to fetch the sub-directory via the official service
                     # (The old code used dir_entry["url"] with a rogue httpx client)
-                    sub_files,sub_shas,is_truncated,_ = await self.gh._get_root_file_list(
+                    sub_files,sub_shas,is_truncated,raw_entries,file_sizes = await self.gh._get_root_file_list(
                         owner, repo , dir_sha, installation_id , params={"recursive":1}
                     )
                     if is_truncated:
@@ -912,7 +911,8 @@ class DeepScout:
                     # Re-align relative paths to repo root (e.g., "web/package.json" -> "apps/web/package.json")
                     prepended_files = {f"{dir_path}/{f}" for f in sub_files}
                     prepended_shas = {f"{dir_path}/{k}": v for k, v in sub_shas.items()}
-                    return prepended_files, prepended_shas
+                    prepended_sizes = {f"{dir_path}/{k}": v for k,v in file_sizes.items()}
+                    return prepended_files, prepended_shas,prepended_sizes
     
                 except (GitHubAuthenticationError,RateLimitError,RepoNotFoundError,RepoAccessError):
                     raise
@@ -923,7 +923,7 @@ class DeepScout:
                         f"GitHub failed to load the contents of '/{folder_name}'. "
                         f"Any packages inside this directory won't appear below."
                     )
-                    return set(),{}
+                    return set(),{},{}
     
             # FIX : Fetch all top-level directories concurrently to save time
             results = await asyncio.gather(*(fetch_single_dir(d) for d in top_level_dirs),return_exceptions=True)
@@ -934,9 +934,10 @@ class DeepScout:
                 elif isinstance(res, Exception):
                     logger.warning("Directory tree fetch failed: %s", res)
                 else:
-                    sub_f, sub_s = res
+                    sub_f, sub_sha,sub_sizes = res
                     merged_files.update(sub_f)
-                    merged_shas.update(sub_s)
+                    merged_shas.update(sub_sha)
+                    merged_sizes.update(sub_sizes)
     
-            return merged_files, merged_shas
+            return merged_files, merged_shas,merged_sizes
         
