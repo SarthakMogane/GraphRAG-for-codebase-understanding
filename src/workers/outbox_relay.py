@@ -65,7 +65,7 @@ class MaintenanceWorker:
             pending_jobs = await conn.fetch(
                 """
                 SELECT ij.id, ij.repo_id, ij.account_id, ij.job_type,r.repo_name, r.owner_login,
-                       r.default_branch, r.size_kb,r.using_git_lfs,
+                       r.default_branch, r.size_kb,
                        us.selected_subprojects, us.selected_submodules,
                        rsr.head_sha,rsr.scout_json
 
@@ -118,7 +118,7 @@ class MaintenanceWorker:
                         "validation_payload": {
                             "default_branch": job["default_branch"],
                             "size_kb": job["size_kb"] or 0,
-                            "uses_git_lfs":job["using_git_lfs"] or False,
+                            "uses_git_lfs":scout_json.get("uses_git_lfs", False),
                         }
                     }
 

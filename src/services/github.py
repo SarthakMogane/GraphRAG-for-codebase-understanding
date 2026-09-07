@@ -57,8 +57,6 @@ class RepoMetadata(BaseModel):
     is_empty: bool
     is_disabled:bool
     is_template:bool
-    has_submodules: bool
-    uses_git_lfs: bool
     description: Optional[str]
     topics: list[str]
 
@@ -474,7 +472,6 @@ class GitHubService:
             )
 
         branch = data.get("default_branch")
-        root_files,_ = await self._get_root_file_list(owner, repo, branch, installation_id)
         
         return RepoMetadata(
             owner=data["owner"]["login"],
@@ -491,15 +488,13 @@ class GitHubService:
             is_empty=data["size"] == 0,
             is_disabled = data.get("disabled"),
             is_template = data.get("is_template"),
-            has_submodules=".gitmodules" in root_files,
-            uses_git_lfs=".gitattributes" in root_files,
             description=data.get("description"),
             topics=data.get("topics", []),
         )
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
     async def _get_root_file_list(self, owner: str, repo: str, branch_or_sha: str, installation_id: int, params: dict = None
-        ) -> tuple[set[str],dict[str,str],bool , list[dict]]:
+        ) -> tuple[set[str],dict[str,str],bool , list[dict], dict[str,int]]:
         """Returns the root file list as a set of paths."""
         if not branch_or_sha:
             return set()
@@ -514,10 +509,16 @@ class GitHubService:
                 for entry in raw_entries
                 if entry.get("type")=="commit" or entry.get("mode") == "160000"
             }
-            return all_files_path,pinned_shas,is_truncated,raw_entries
+            file_sizes = {
+                entry["path"]: entry.get("size", 0)
+                for entry in raw_entries
+                if entry.get("type") == "blob"
+            }
+
+            return all_files_path,pinned_shas,is_truncated,raw_entries,file_sizes
         
         except (RepoNotFoundError, GitHubConflictError):
-            return set(),{},False,[]
+            return set(),{},False,{}
 
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5), retry=retry(should_retry_httpx_error),reraise=True)
