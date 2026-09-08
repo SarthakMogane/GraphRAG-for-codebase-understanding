@@ -151,8 +151,6 @@ class ValidationResult:
     size_kb: Optional[int] = None
     description: Optional[str] = None
     topics: list[str] = field(default_factory=list)
-    has_submodules: bool = False
-    uses_git_lfs: bool = False
 
     # Check sub-results
     rate_limit: Optional[RateLimitStatus] = None
@@ -190,7 +188,7 @@ class SubProjectScore:
 
     # Raw signals
     source_file_count: int = 0
-    source_byte_count: int = 0
+    subproject_byte_count: int = 0
     has_own_manifest: bool = False          # Has its own package.json / go.mod etc.
     has_own_readme: bool = False
     has_entry_point: bool = False           # Contains main.*, index.*, app.*, server.*

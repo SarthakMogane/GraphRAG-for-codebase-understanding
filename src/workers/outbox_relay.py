@@ -64,15 +64,15 @@ class MaintenanceWorker:
             # SKIP LOCKED guarantees no deadlocks if you boot 5 relay containers
             pending_jobs = await conn.fetch(
                 """
-                SELECT ij.id, ij.repo_id, ij.account_id, ij.job_type,r.repo_name, r.owner_login,
-                       r.default_branch, r.size_kb,
+                SELECT ij.id, ij.repo_id, ij.account_id, ij.job_type,
+                       r.repo_name, r.owner_login,
                        us.selected_subprojects, us.selected_submodules,
                        rsr.head_sha,rsr.scout_json
 
                 FROM ingestion_jobs ij
                 JOIN repos r ON r.id = ij.repo_id
-                JOIN repo_scout_result rsr ON rsr.repo_id = r.id
                 JOIN user_selections us ON us.id = ij.selection_id
+                JOIN repo_scout_result rsr ON rsr.id = us.scout_result_id
                 WHERE ij.status = 'dispatch_pending'
                 ORDER BY ij.created_at ASC
                 LIMIT 10
@@ -92,11 +92,105 @@ class MaintenanceWorker:
 
             async with self.session.client('sqs') as sqs_client:
                 successful_job_ids = []
-                scout_json = job["scout_json"] or {}
-                monorepo = scout_json.get("is_monorepo",False)
-                total_subprojects = len(scout_json.get("subprojects",[]))
+                
 
                 for job in pending_jobs:
+                    scout_json = job["scout_json"] or {}
+                    total_subprojects = len(scout_json.get("subprojects",[]))
+
+                    selected_subproject_paths = set(
+                        job["selected_subprojects"] or []
+                    )
+
+                    selected_submodule_paths = set(
+                        job["selected_submodules"] or []
+                    )
+                    scout_subprojects = scout_json.get("subprojects", [])
+                    scout_submodules = scout_json.get("submodules", [])
+
+                    subproject_by_path = {
+                        node["path"]: node
+                        for node in scout_subprojects if "path" in node
+                    }
+
+                    submodule_by_path = {
+                        node["path"]: node
+                        for node in scout_submodules if "path" in node
+                    }
+
+                    for sm in scout_submodules:
+                        if "subproject" in sm:
+                            for sp in sm["subprojects"]:
+                                if "path" in sp:
+                                    subproject_by_path[sp["path"]] = sp
+
+                    selected_subprojects = [
+                        subproject_by_path[path]
+                        for path in selected_subproject_paths
+                        if path in subproject_by_path
+                    ]
+
+                    selected_submodules = [
+                        submodule_by_path[path]
+                        for path in selected_submodule_paths
+                        if path in submodule_by_path
+                    ]
+
+                    missing_subprojects = (
+                        selected_subproject_paths - subproject_by_path.keys()
+                    )
+
+                    missing_submodules = (
+                        selected_submodule_paths - submodule_by_path.keys()
+                    )
+
+                    if missing_subprojects or missing_submodules:
+                        raise RuntimeError(
+                            f"Selection references missing scout nodes: "
+                            f"subprojects={sorted(missing_subprojects)}, "
+                            f"submodules={sorted(missing_submodules)}"
+                        )
+
+                    # FORMAT SELECTED SUBPROJECTS (UNIFORM SCHEMA) ---
+                    def map_subproject(node: dict) -> dict:
+                        return {
+                            "path": node.get("path"),
+                            "name": node.get("name"),
+                            "composite_score": node.get("composite_score", 0.0),
+                            "auto_selected": node.get("auto_selected", False),
+                            "source_file_count": node.get("source_file_count", 0),
+                            "subproject_byte_count": node.get("subproject_byte_count", 0),
+                            "has_entry_point": node.get("has_entry_point", False),
+                            "dependent_count": node.get("dependent_count", 0),
+                            "recent_commit_count": node.get("recent_commit_count", 0),
+                            "skip_reason": node.get("skip_reason"),
+                        }
+
+                    # Format the root selected subprojects
+                    formatted_selected_subprojects = [map_subproject(sp) for sp in selected_subprojects]
+                    formatted_selected_submodules = []
+                    for node in selected_submodules:
+                        formatted_selected_submodules.append({
+                            "path": node["path"],
+                            "name": node["name"],
+                            "owner": node.get("resolved_owner"),
+                            "repo": node.get("resolved_repo"),
+                            "url": node.get("resolved_url"),
+                            "pinned_sha": node.get("pinned_sha"),
+                            "outcome": node.get("outcome"),
+                            "is_private": node.get("is_private"),
+                            "is_monorepo": node.get("is_monorepo", False),
+                            "uses_git_lfs": node.get("uses_git_lfs", False),
+                            "complexity_band": node.get("complexity_band"),
+                            "estimated_source_files": node.get("estimated_source_files", 0),
+                            "estimated_source_bytes": node.get("estimated_source_bytes", 0),
+                            
+                            # Keep structural mapping identical for subprojects nested under submodules!
+                            "subprojects": [
+                                map_subproject(sp) for sp in node.get("subprojects", [])
+                            ],
+                        })
+                    #payload
                     delivery_id = str(job["id"])
                     group_id = str(job["repo_id"])
                     payload = {
@@ -107,17 +201,17 @@ class MaintenanceWorker:
                         "job_id": str(job["id"]),
                         "job_type": job["job_type"],
                         "head_sha":job["head_sha"],
-                        "is_monorepo":monorepo,
+                        "is_monorepo":scout_json.get("is_monorepo", False),
                         
 
                         "selection_payload": {
                             "total_subprojects":total_subprojects,
-                            "selected_subprojects": job["selected_subprojects"],
-                            "selected_submodules": job["selected_submodules"],
+                            "selected_subprojects": formatted_selected_subprojects,
+                            "selected_submodules": formatted_selected_submodules,
                         },
                         "validation_payload": {
-                            "default_branch": job["default_branch"],
-                            "size_kb": job["size_kb"] or 0,
+                            "default_branch": scout_json.get("default_branch"),
+                            "size_kb": scout_json.get("size_kb", 0),
                             "uses_git_lfs":scout_json.get("uses_git_lfs", False),
                         }
                     }
