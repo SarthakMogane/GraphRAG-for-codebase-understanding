@@ -73,7 +73,7 @@ async def run_scout(
                 raise HTTPException(status_code=404, detail="Repository not found")
 
             if repo["index_status"] in ("scouting", "indexing","submodules","cloning","filtering","manifesting"
-                                        ,"inaccessible"):
+                                        ,"inaccessible"): #need update 
                 raise HTTPException(
                     status_code=409, 
                     detail=f"Action locked: Repository is currently in '{repo['index_status']}' status."
@@ -274,13 +274,23 @@ async def submit_selection(
 
     # Validate subprojects paths
     valid_subprojects = {sp["path"] for sp in scout_data.get("subprojects", [])}
-    invalid_sp = set(payload.selected_subprojects) - valid_subprojects
-    if invalid_sp:
-         raise HTTPException(status_code=422, detail=f"Selection vector configuration contains unauthorized path scopes: {sorted(invalid_sp)}")
 
     # Validate submodules paths
     SELECTABLE_OUTCOMES = {"private_full", "private_monorepo", "private_queued", "private_cross_link"}
-    valid_submodules = {sm["path"] for sm in scout_data.get("submodules", []) if sm.get("outcome") in SELECTABLE_OUTCOMES}
+    valid_submodules = set()
+    for sm in scout_data.get("submodules", []):
+        if sm.get("outcome") in SELECTABLE_OUTCOMES:
+            valid_submodules.add(sm["path"])
+        
+        # CRITICAL FIX: Look inside the submodule to extract its nested subproject paths
+        if "subprojects" in sm:
+            for sp in sm["subprojects"]:
+                valid_subprojects.add(sp["path"])
+
+    invalid_sp = set(payload.selected_subprojects) - valid_subprojects
+    if invalid_sp:
+        raise HTTPException(status_code=422, detail=f"Selection vector configuration contains unauthorized path scopes: {sorted(invalid_sp)}")
+    
     invalid_sm = set(payload.selected_submodules) - valid_submodules
     if invalid_sm:
          raise HTTPException(status_code=422, detail=f"Submodule path selection rejected due to insufficient account permissions or configuration properties: {sorted(invalid_sm)}")
