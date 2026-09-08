@@ -106,6 +106,8 @@ class SubmoduleNode:
     pinned_sha: Optional[str]
     outcome: SubmoduleOutcome
     is_private: Optional[bool]
+    uses_git_lfs: bool = False
+    has_submodules: bool = False
     depth: int
     auto_selected: bool
     user_can_toggle: bool
@@ -119,6 +121,8 @@ class SubmoduleNode:
     nested_submodules: list[SubmoduleNode] = field(default_factory=list)
     complexity_band: Optional[str] = None
     estimated_source_files: int = 0
+    estimated_source_bytes: int = 0
+    pinned_sha: Optional[str]
     linked_repo_id: Optional[int] = None
 
 
@@ -137,6 +141,8 @@ class RepoScoutResult:
     default_branch: str
     github_id: int
     size_kb: int
+    uses_git_lfs: bool
+    has_submodules: bool
     primary_language: Optional[str]
     is_monorepo: bool
     monorepo_tooling: Optional[str]
@@ -211,6 +217,9 @@ class DeepScout:
         self._api_calls += 2
        
         root_files = {path for path in all_file_paths if "/" not in path}
+        has_submodules = ".gitmodules" in root_files
+        uses_git_lfs = ".gitattributes" in root_files
+
         
         full_tree_paths = list(all_file_paths)
 
@@ -228,7 +237,7 @@ class DeepScout:
                 )
         )
         sub_task = asyncio.create_task(
-            self._scout_submodules(owner, repo, branch, root_files, depth=1)
+            self._scout_submodules(owner, repo, branch, root_files, pinned_shas, depth=1)
         )
         mono_result, (submodule_nodes,submodule_warnings) = await asyncio.gather(mono_task, sub_task)
 
@@ -258,6 +267,8 @@ class DeepScout:
             default_branch=branch,
             github_id=metadata.github_id,
             size_kb=metadata.size_kb,
+            uses_git_lfs=uses_git_lfs,
+            has_submodules=has_submodules,
             primary_language=metadata.primary_language,
             is_monorepo=mono_result.is_monorepo if mono_result else False,
             monorepo_tooling=(
@@ -270,7 +281,7 @@ class DeepScout:
             total_submodules=len(all_flat),
             private_accessible=sum(1 for s in all_flat if s.outcome in INDEXED_OUTCOMES),
             install_required=sum(
-                1 for s in all_flat if s.outcome == SubmoduleOutcome.INSTALL_REQUIRED
+                1 for s in all_flat if s.outcome == SubmoduleOutcome.ACCESS_REQUIRED
             ),
             public_skipped=sum(
                 1 for s in all_flat if s.outcome == SubmoduleOutcome.PUBLIC_SKIPPED
@@ -294,6 +305,7 @@ class DeepScout:
         repo: str,
         branch: str,
         root_files: set[str],
+        pinned_shas: dict[str,str],
         depth: int,
     ) -> tuple[list[SubmoduleNode],list[str]]:
         """
@@ -301,6 +313,7 @@ class DeepScout:
         All sibling submodules are classified concurrently.
         Uses GitHubService.get_file_content() — no raw httpx calls.
         """
+        
         if ".gitmodules" not in root_files:
             return [],[]
         
@@ -323,9 +336,9 @@ class DeepScout:
             return [],[]
         
         entries:GitmodulesEntry = GitmodulesParser().parse(gitmodules_content)
-
+        
         tasks = [
-            asyncio.create_task(self._classify_submodule(entry,owner, depth))
+            asyncio.create_task(self._classify_submodule(entry,owner,pinned_sha=pinned_shas.get(entry.path), depth=depth))
             for entry in entries
         ]
         raw = await asyncio.gather(*tasks, return_exceptions=True)
@@ -362,6 +375,7 @@ class DeepScout:
         self,
         entry,
         parent_owner,
+        pinned_sha,
         depth: int,
     ) -> tuple[SubmoduleNode,list[str]]:
         """
@@ -376,7 +390,7 @@ class DeepScout:
         # ── Resolve URL ───────────────────────────────────────────────────────
         owner = entry.owner
         repo = entry.repo
-        if not entry.is_valid_url or owner or not repo:
+        if not entry.is_valid_url or not owner or not repo:
             return SubmoduleNode(
                 path=entry.path,
                 name=entry.name,
@@ -432,7 +446,28 @@ class DeepScout:
                 action_required=False, action_label=None, action_url=None,
                 skip_reason="Max depth reached",
             )
-
+        
+        if not pinned_sha:
+            sub_warnings.append(
+                f"Could not resolve pinned commit for submodule '{entry.path}'."
+            )
+            return SubmoduleNode(
+                path=entry.path,
+                name=entry.name,
+                resolved_owner=owner,
+                resolved_repo=repo,
+                resolved_url=base_url,
+                pinned_sha=None,
+                outcome=SubmoduleOutcome.INACCESSIBLE,
+                is_private=None,
+                depth=depth,
+                auto_selected=False,
+                user_can_toggle=False,
+                action_required=False,
+                action_label=None,
+                action_url=None,
+                skip_reason="Parent repository does not contain a resolvable gitlink SHA.",
+            ), sub_warnings
         # ── Fetch metadata via GitHubService (installation token auth) ────────
         self._api_calls += 1
         try:
@@ -510,16 +545,19 @@ class DeepScout:
                 action_required=False, action_label=None, action_url=None,
                 skip_reason="Already indexed — will cross-link wikis",
                 linked_repo_id=self.already_indexed[repo_key], # upDATE high security needed . 
+                pinned_sha=pinned_sha,
             ),sub_warnings
 
         # ── Fetch root files then run mono detection, size, nested scout
         # all three in parallel ────────────────────────────────────────────────
         self._api_calls += 1
-        sub_all_file_paths,pinned_sha,files_sizes = await self._fetch_full_tree_safe(
-            owner, repo, sub_branch, self.installation_id ,warnings=sub_warnings
+        sub_all_file_paths,sub_tree_git_links,files_sizes = await self._fetch_full_tree_safe(
+            owner, repo, pinned_sha, self.installation_id ,warnings=sub_warnings
         )
         sub_root_files = {path for path in sub_all_file_paths if "/" not in path}
         sub_full_tree_paths = list(sub_all_file_paths)
+        has_submodules = ".gitmodules" in sub_root_files
+        uses_git_lfs = ".gitattributes" in sub_root_files
 
         mono_task = asyncio.create_task(
             self._detect_monorepo(
@@ -568,7 +606,9 @@ class DeepScout:
             resolved_url=base_url,
             pinned_sha=None,     # Populated in Phase 3 via git ls-tree after clone
             outcome=outcome,
-            is_private=True,
+            is_private=True, 
+            uses_git_lfs=uses_git_lfs,
+            has_submodules=has_submodules,
             depth=depth,
             auto_selected=auto_selected,
             user_can_toggle=(depth == 1),
@@ -587,6 +627,8 @@ class DeepScout:
             nested_submodules=[],
             complexity_band=band,
             estimated_source_files=file_count,
+            estimated_source_bytes=byte_count,
+            pinned_sha=pinned_sha,
         ),sub_warnings
 
     # ─────────────────────────────────────────────────────────────────────────
