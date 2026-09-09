@@ -122,8 +122,15 @@ class TrustedOrchestrator:
         create metadata and calls CloneStrategySelector.select().
         """
         validation=body.get("validation_payload",{})
+        size_kb = validation.get("size_kb")
+        if not size_kb:
+            raise MicroVMError(
+            f"Missing repository size metadata for {owner}/{repo}",
+            code="MISSING_REPO_SIZE",
+            retryable=False,
+        )
         sizing = RepoSizingInfo(
-            size_kb=validation.get("size_kb",0),
+            size_kb=size_kb,
             owner=owner,
             name=repo,
             uses_git_lfs=validation.get("uses_git_lfs",False)
@@ -136,7 +143,38 @@ class TrustedOrchestrator:
             sparse_dirs=selection.get("selected_subprojects", []),
             total_subprojects_detected=selection.get("total_subprojects",0)
         )
-        
+    
+    def _build_submodule_clone_config(
+        self,
+        submodule: dict,
+    ) -> CloneConfig:
+
+        validation = submodule.get("validation_payload", {})
+
+        size_bytes = submodule.get("estimated_source_bytes", 0)
+        size_kb = size_bytes // 1024
+
+        sizing = RepoSizingInfo(
+            size_kb=size_kb,
+            owner=submodule["owner"],
+            name=submodule["repo"],
+            uses_git_lfs=submodule.get("uses_git_lfs", False),
+        )
+        pinned_sha = submodule.get("pinned_sha")
+        subprojects = submodule.get("selected_subprojects",[])
+        selected_paths = [
+            sp["path"] for sp in subprojects
+            if isinstance(sp, dict) and "path" in sp
+        ]
+        config = self.strategy_selector.select(
+            metadata=sizing,
+            is_monorepo=submodule.get("is_monorepo", False),
+            sparse_dir=selected_paths,
+            total_subprojects_detected=len(subprojects)
+        )
+        config.pinned_sha = pinned_sha
+        return config
+    
     async def process_single_tenant_job(self, sqs, msg ,kms_client , s3_client , microvm):
         """
         Orchestrates one job end to end. Runs concurrently alongside
@@ -188,6 +226,19 @@ class TrustedOrchestrator:
                     retryable=False,
                 )
 
+            selection = body.get("selection_payload",{})
+            selected_submodules = selection.get("selected_submodules", [])
+
+            submodule_payload = []
+
+            for submodule in selected_submodules:
+                clone_config = self._build_submodule_clone_config(submodule)
+
+                submodule_payload.append({
+                    **submodule,
+                    "clone_config": dataclasses.asdict(clone_config),
+                })
+
             # 3. TRUSTED ZONE: Generate Pre-Signed S3 PUT URL (Zero-Credential Access for Sandbox)
             try:
                 presigned_s3_url = await s3_client.generate_presigned_url(
@@ -217,7 +268,7 @@ class TrustedOrchestrator:
                     "repo":          repo,
                     "branch":        body.get("branch", "main"),
                     "clone_config":  dataclasses.asdict(clone_config),
-                    "submodules":    body.get("selected_submodules", []),
+                    "submodules":    submodule_payload,
                     "github_token":  github_token,   # never logged — see redaction note in sandbox_app/app.py
                     "presigned_url": presigned_s3_url,
                     "image_version": str(settings.IMAGE_VERSION),
