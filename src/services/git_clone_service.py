@@ -119,12 +119,12 @@ class GitCloneService:
 
         # //strategy execution
         try:
-            if clone_config.strategy == CloneStrategy.SPARSE_CHECKOUT:
+            if clone_config.strategy == CloneStrategy.SPARSE_CHECKOUT.value:
                 await self._clone_sparse(clone_url,dest,clone_config,home_dir,auth_flag)
-            elif clone_config.strategy == CloneStrategy.PARTIAL_BLOB:
+            elif clone_config.strategy == CloneStrategy.PARTIAL_BLOB.value:
                 await self._clone_partial(clone_url,dest,clone_config,home_dir,auth_flag)
             else:
-                await self._clone_shalllow()
+                await self._clone_shallow(clone_url,dest,clone_config,home_dir,auth_flag)
 
             logger.info("Clone complete: %s/%s → %s", owner, repo, dest)
             return dest
@@ -235,86 +235,152 @@ class GitCloneService:
         logger.info(
             "Sparse checkout complete - materialized %d directories",len(dirs_to_include)
         )
-
-    async def init_submodule(
-            self,
-            repo_path:Path,
-            submodule_path:str,
-            home_dir:Path,
-            auth_token:str,
-            use_blob_filter:bool = False,
-            
+    
+    async def init_submodules(
+        self,
+        repo_path: Path,
+        selected_submodules: list[dict], 
+        auth_token: str,
+        home_dir: Path,
+        jobs: int = None,
     ) -> None:
         """
-        Initialize a single approved submodule with a shallow depth-1 clone.
-        Called individually for each approved submodule — never with --recursive.
+        Initializes submodules using the Dual-Branch Strategy with strongly-typed configs.
         """
-        extra = ["--filter=blob:none"] if use_blob_filter else []
-        auth_flag = self._auth_header_flag(auth_token=auth_token)
-        cmd = self._git_cmd(
-            *auth_flag,
-            "submodule","update"
-            "--init",
-            "--depth","1",
-            *extra,
-            "--",
-            submodule_path,
-        )
-        env = self._build_env(CloneConfig(),home_dir)
-        await self._run(cmd,cwd=repo_path,env=env)
-        logger.info("Submodule initialized: %s", submodule_path)
-
-
-    async def init_submodule_parallel(
-        self,
-        repo_path:Path,
-        submodule_paths:list[str],
-        auth_token:str,
-        home_dir:Path,
-        use_blob_filter:bool = False,
-        jobs:int = None,
-    )-> None:
-        """
-        Initialize multiple approved submodules in parallel using --jobs.
-        Significantly faster than sequential initialization.
- 
-        Args:
-            repo_path:        Parent repo working tree path
-            submodule_paths:  List of submodule paths to initialize
-            jobs:             Parallel job count (defaults to config value)
-            home_dir:         Build explicit environment
-            auth_token:       github token to access submodules
-            use_blob_filter: True for large submodules to avoid downloading blobs
-        """
-
-        if not submodule_paths:
+        if not selected_submodules:
             return 
 
-        parallel = jobs or settings.SUBMODULE_PARALLEL_JOBS  #update move to job consumer directly .
-        extra = ["--filter=blob:none"] if use_blob_filter else []
+        parallel = jobs or settings.SUBMODULE_PARALLEL_JOBS
         auth_flag = self._auth_header_flag(auth_token=auth_token)
-        cmd = self._git_cmd(
+
+        normal_subs = []
+        monorepo_subs = []
+
+        # Route submodules using Object Attributes
+        for sub in selected_submodules:
+            if sub.is_monorepo and sub.subprojects:
+                monorepo_subs.append(sub)
+            else:
+                normal_subs.append(sub)
+
+        # ── BRANCH A: NORMAL SUBMODULES (Native Parallel Update) ──
+        if normal_subs:
+            normal_paths = [sub["path"] for sub in normal_subs]
+            
+            use_blob_filter = any(
+            sub.get("clone_config", {}).get("strategy") == CloneStrategy.PARTIAL_BLOB.value
+            or sub.get("clone_config", {}).get("filter_blob_none", False)
+            for sub in normal_subs
+            )
+            should_skip_lfs = any(
+                sub.get("clone_config", {}).get("skip_lfs", False) for sub in normal_subs
+            )
+            # Build batch CloneConfig for the combined git submodule command
+            batch_config = CloneConfig(
+                strategy=CloneStrategy.PARTIAL_BLOB if use_blob_filter else CloneStrategy.SHALLOW,
+                skip_lfs=should_skip_lfs,
+                filter_blob_none=use_blob_filter
+            )
+
+            batch_env = self._build_env(batch_config, home_dir)
+
+            extra = ["--filter=blob:none"] if use_blob_filter else []
+
+            
+            # NOTE: For normal submodules, we do NOT manually pass `pinned_sha` here.
+            # `git submodule update` automatically reads the correct pinned SHA 
+            # from the parent repo's git tree.
+            cmd = self._git_cmd(
                 *auth_flag,
-                "submodule","update",
+                "submodule", "update",
                 "--init",
-                "depth","1",
+                "--depth", "1",
+                f"--jobs={parallel}",
                 *extra,
-                f"--jobs={parallel}"
                 "--",
-                *submodule_paths
-        )
-        env = self._build_env(CloneConfig(),home_dir)
+                *normal_paths
+            )
+            
+            logger.info("Initializing %d normal submodules in parallel", len(normal_paths))
+            await self._run(cmd=cmd, cwd=repo_path, env=batch_env)
 
-        await self._run(
-            cmd=cmd,
-            cwd=repo_path,
-            env=env,
+        # ── BRANCH B: MONOREPO SUBMODULES (Custom Parallel Sparse Clone) ──
+        if monorepo_subs:
+            logger.info("Initializing %d monorepo submodules via sparse partial clone", len(monorepo_subs))
+            
+            tasks = [
+                self._clone_sparse_submodule(sub, repo_path, auth_flag,home_dir)
+                for sub in monorepo_subs
+            ]
+            
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for i, res in enumerate(results):
+                if isinstance(res, Exception):
+                    failed_path = monorepo_subs[i].path
+                    raise CloneError(f"Sparse clone failed for monorepo submodule {failed_path}: {res}") from res
+
+    async def _clone_sparse_submodule(
+        self, 
+        submodule: dict, 
+        repo_path: Path, 
+        auth_flag: list[str], 
+        home_dir: Path,
+    ) -> None:
+        """
+        Manually sparse-clones a monorepo submodule. Because we bypass standard 
+        submodule commands here, we MUST manually check out the pinned_sha.
+        """
+        sub_path = submodule["path"]
+        url = submodule["url"]
+        target_dir = repo_path / sub_path
+
+        clone_cfg_dict = submodule.get("clone_config", {})
+
+        strategy_str = clone_cfg_dict.get("strategy") or CloneStrategy.SPARSE_CHECKOUT.value
+
+        sub_clone_config = CloneConfig(
+            strategy=strategy_str,
+            skip_lfs=clone_cfg_dict.get("skip_lfs", False),
+            pinned_sha=clone_cfg_dict.get("pinned_sha"),
+            sparse_dirs=clone_cfg_dict.get("sparse_dirs", [])
         )
 
-        logger.info(
-            "Initialized %d submodules in parallel (jobs=%d)",
-            len(submodule_paths), parallel
+        env = self._build_env(sub_clone_config,home_dir=home_dir)
+
+        sparse_dirs = sub_clone_config.sparse_dirs
+        if not sparse_dirs:
+            subprojects = submodule.get("subprojects", [])
+            sparse_dirs = [sp["path"] for sp in subprojects if isinstance(sp, dict) and "path" in sp]
+
+        if not sparse_dirs:
+            sparse_dirs = ["/"]
+
+        # 2. Partial clone graph (REQUIRED for sparse checkout)
+        # We always use blob:none here regardless of CloneConfig, because fetching 
+        # blobs before sparse-checkout defeats the purpose of sparse-checkout.
+        clone_cmd = self._git_cmd(
+            *auth_flag,
+            "clone", "--filter=blob:none", "--no-checkout",
+            url, str(target_dir)
         )
+        await self._run(cmd=clone_cmd, cwd=repo_path, env=env)
+
+        # 3. Initialize sparse-checkout in cone mode
+        sparse_init_cmd = self._git_cmd("sparse-checkout", "init", "--cone")
+        await self._run(cmd=sparse_init_cmd, cwd=target_dir, env=env)
+
+        # 4. Set the selected subproject directories
+        sparse_set_cmd = self._git_cmd("sparse-checkout", "set", *sparse_dirs)
+        await self._run(cmd=sparse_set_cmd, cwd=target_dir, env=env)
+
+        # 5. Check out the Pinned SHA!
+        # This is where pinned_sha is crucially used in the commands.
+        target_ref = sub_clone_config.pinned_sha if sub_clone_config.pinned_sha else "HEAD"
+        checkout_cmd = self._git_cmd("checkout", target_ref)
+        await self._run(cmd=checkout_cmd, cwd=target_dir, env=env)
+        
+        logger.info(f"Successfully sparse-cloned monorepo submodule '{submodule["path"]}' at {target_ref}")
 
     def _verify_git_version(self) -> None:
         try:
@@ -380,11 +446,12 @@ class GitCloneService:
             "PATH":os.environ.get("PATH","/usr/bin:/bin"),
             "HOME":str(home_dir),
             "GIT_TERMINAL_PROMPT":"0",# never block waiting for interactive input
-            "GIT_ALLOW_PROTOCOL":"https" # only https transport is ever honored
+            "GIT_ALLOW_PROTOCOL":"https",# only https transport is ever honored
+            "GIT_CONFIG_NOSYSTEM":"1", # Ignore host-level git configs or system config
         }
 
         if config.skip_lfs:
-            env = env["GIT_LFS_SKIP_SMUDGE"] = "1"
+            env["GIT_LFS_SKIP_SMUDGE"] = "1"
         return env
 
     def _hook_sink_dir(self) -> Path:
@@ -458,7 +525,7 @@ class GitCloneService:
                     env=env,
                     capture_output=True,
                     text=True,
-                    timout=timeout_seconds
+                    timeout=timeout_seconds
 
 
                 )
