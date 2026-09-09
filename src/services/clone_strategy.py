@@ -22,7 +22,7 @@ class RepoSizingInfo:
 
 @dataclass
 class CloneConfig:
-    strategy:CloneStrategy
+    strategy:Union[CloneStrategy, str]
     depth : int = 1
     single_branch:bool = True
     filter_blob_none:bool = False
@@ -31,6 +31,7 @@ class CloneConfig:
     skip_lfs:bool = False #True:GIT_LFS_SKIP_SMUDGE=1
     recurse_submodule:bool = False
     estimated_disk_mb:int = 0 
+    pinned_sha: Optional[str] = None
 
 class CloneStrategySelector:
     """
@@ -73,7 +74,7 @@ class CloneStrategySelector:
         LFS skip only if LFS is detected (avoid downloading model weights, etc.)
         """
         return CloneConfig(
-            strategy=CloneStrategy.SHALLOW,
+            strategy=CloneStrategy.SHALLOW.value,
             depth=1,
             single_branch=True,
             filter_blob_none=False,
@@ -90,10 +91,11 @@ class CloneStrategySelector:
         """
         retention = settings.CLONE_MEDIUM_SIZE_RETENTION_PERCENT
         return CloneConfig(
-            strategy=CloneStrategy.PARTIAL_BLOB,
+            strategy=CloneStrategy.PARTIAL_BLOB.value,
             depth=1,
             single_branch=True,
             filter_blob_none=True,
+            no_checkout=True,
             skip_lfs=metadata.uses_git_lfs,
             estimated_disk_mb=(metadata.size_kb*retention)//(1048*100)
         )
@@ -106,7 +108,7 @@ class CloneStrategySelector:
         """
 
         return CloneConfig(
-            strategy=CloneStrategy.PARTIAL_BLOB,   # Upgraded to sparse in execute phase
+            strategy=CloneStrategy.PARTIAL_BLOB.value,   # Upgraded to sparse in execute phase
             depth=1,
             single_branch=True,
             filter_blob_none=True,
@@ -127,7 +129,7 @@ class CloneStrategySelector:
         """
         estimate_monorepo_size = self.estimate_monorepo_disk_mb(metadata.size_kb,sparse_dirs,total_subprojects_detected)
         return CloneConfig(
-            strategy=CloneStrategy.SPARSE_CHECKOUT,
+            strategy=CloneStrategy.SPARSE_CHECKOUT.value,
             depth=1,
             single_branch=True,
             filter_blob_none=True,
