@@ -41,6 +41,7 @@ import asyncio
 from pathlib import Path
 from typing import Optional
 from src.services.clone_strategy import CloneConfig
+from sandbox_microvm.workspace import WorkspacePathViolation
 from src.models.database import CloneStrategy
 from src.core.logger import get_logger
 from src.core.config import get_settings
@@ -258,7 +259,7 @@ class GitCloneService:
 
         # Route submodules using Object Attributes
         for sub in selected_submodules:
-            if sub.is_monorepo and sub.subprojects:
+            if sub.get("is_monorepo") and sub.get("subprojects"):
                 monorepo_subs.append(sub)
             else:
                 normal_subs.append(sub)
@@ -334,7 +335,9 @@ class GitCloneService:
         sub_path = submodule["path"]
         url = submodule["url"]
         target_dir = repo_path / sub_path
-
+        if not target_dir.is_relative_to(repo_path.resolve()):
+            raise WorkspacePathViolation(f"Submodule path escape detected: {target_dir}")
+        
         clone_cfg_dict = submodule.get("clone_config", {})
 
         strategy_str = clone_cfg_dict.get("strategy") or CloneStrategy.SPARSE_CHECKOUT.value
@@ -536,9 +539,12 @@ class GitCloneService:
                 ) from e
 
         if result.returncode !=0:
+            redacted_cmd = " ".join(self._redact_for_log(cmd))
+            redacted_stderr = self._redact_text(result.stderr) # Sanitize token strings in stderr
+            
             raise CloneError(
-                  f"Git command failed (exit {result.returncode}): "
-                f"{' '.join(cmd)}\nstderr: {result.stderr}"
+                f"Git command failed (exit {result.returncode}): {redacted_cmd}\n"
+                f"stderr: {redacted_stderr}"
             )
 
         return result
@@ -560,3 +566,41 @@ class GitCloneService:
                 cleaned_cmd.append(argument)
                 
         return cleaned_cmd
+
+
+    def _redact_text(self, text: Optional[str], active_token: Optional[str] = None) -> str:
+        """
+        Sanitizes raw text (such as subprocess stderr, stdout, or error messages)
+        by masking known secret patterns and any explicitly provided active token.
+        """
+
+        _PATTERNS = [
+                # 1. Credentials in URLs: https://x-access-token:ghp_xxx@github.com or https://token@github.com
+                (re.compile(r"(https?://)([^/\s:@]+)(?::([^/\s@]+))?@"), r"\1[REDACTED]@"),
+                
+                # 2. GitHub Personal Access Tokens (Classic & Fine-Grained)
+                (re.compile(r"ghp_[a-zA-Z0-9]{36}"), "[REDACTED_GITHUB_TOKEN]"),
+                (re.compile(r"github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}"), "[REDACTED_GITHUB_PAT]"),
+                
+                # 3. Other GitHub Token types (OAuth, App, Refresh)
+                (re.compile(r"gh[orsu]_[a-zA-Z0-9]{36}"), "[REDACTED_GITHUB_TOKEN]"),
+                
+                # 4. Bearer / Basic auth header values
+                (re.compile(r"(?i)(authorization:\s*bearer\s+)[^\s]+"), r"\1[REDACTED]"),
+                (re.compile(r"(?i)(authorization:\s*basic\s+)[^\s]+"), r"\1[REDACTED]"),
+            ]
+        
+        if not text:
+            return ""
+
+        sanitized = text
+
+        # 1. Redact exact matches of the current job's auth token if provided
+        if active_token and active_token in sanitized:
+            sanitized = sanitized.replace(active_token, "[REDACTED_TOKEN]")
+
+        # 2. Run regex replacements for URL credentials and structured token types
+        for pattern, replacement in self._PATTERNS:
+            sanitized = pattern.sub(replacement, sanitized)
+
+        return sanitized
