@@ -137,11 +137,18 @@ class TrustedOrchestrator:
         )
 
         selection = body.get("selection_payload",{})
+        selected_subprojects = selection.get("selected_subprojects",[])
+
+        selected_subprojects_bytes = sum(
+            sp.get("subproject_byte_count",0) for sp in selected_subprojects
+        )
+
+        selected_subprojects_paths = [sp["path"] for sp in selected_subprojects if isinstance(sp,dict) and "path" in sp ]
         return self.strategy_selector.select(
             metadata=sizing,
             is_monorepo=body.get("is_monorepo",False),
-            sparse_dirs=selection.get("selected_subprojects", []),
-            total_subprojects_detected=selection.get("total_subprojects",0)
+            sparse_dirs=selected_subprojects_paths,
+            selected_subprojects_bytes=selected_subprojects_bytes,   
         )
     
     def _build_submodule_clone_config(
@@ -166,11 +173,16 @@ class TrustedOrchestrator:
             sp["path"] for sp in subprojects
             if isinstance(sp, dict) and "path" in sp
         ]
+
+        selected_subproject_bytes = sum(
+            sp.get("subproject_byte_count", 0) for sp in subprojects
+        )
+
         config = self.strategy_selector.select(
             metadata=sizing,
             is_monorepo=submodule.get("is_monorepo", False),
             sparse_dir=selected_paths,
-            total_subprojects_detected=len(subprojects)
+            selected_subproject_bytes=selected_subproject_bytes
         )
         config.pinned_sha = pinned_sha
         return config
@@ -218,13 +230,7 @@ class TrustedOrchestrator:
 
             # clone strategy
             clone_config = await self._decide_clone_strategy(repo_id=repo_id, owner=owner ,repo=repo,body=body)
-            if clone_config.estimated_disk_mb > settings.CLONE_SANITY_REJECT_MB:
-                raise MicroVMError(
-                    f"Repo {owner}/{repo} estimated at {clone_config.estimated_disk_mb}MB "
-                    f"exceeds the {settings.CLONE_SANITY_REJECT_MB}MB sanity limit",
-                    code="SANITY_REPO_TOO_LARGE",
-                    retryable=False,
-                )
+            total_estimated_mb = clone_config.estimated_disk_mb
 
             selection = body.get("selection_payload",{})
             selected_submodules = selection.get("selected_submodules", [])
@@ -232,13 +238,21 @@ class TrustedOrchestrator:
             submodule_payload = []
 
             for submodule in selected_submodules:
-                clone_config = self._build_submodule_clone_config(submodule)
+                sub_clone_config = self._build_submodule_clone_config(submodule)
+                total_estimated_mb += sub_clone_config.estimated_disk_mb
 
                 submodule_payload.append({
                     **submodule,
-                    "clone_config": dataclasses.asdict(clone_config),
+                    "clone_config": dataclasses.asdict(sub_clone_config),
                 })
 
+            if total_estimated_mb > settings.CLONE_SANITY_REJECT_MB:
+                            raise MicroVMError(
+                                f"Repo {owner}/{repo} estimated at {clone_config.estimated_disk_mb}MB "
+                                f"exceeds the {settings.CLONE_SANITY_REJECT_MB}MB sanity limit",
+                                code="SANITY_REPO_TOO_LARGE",
+                                retryable=False,
+                            )
             # 3. TRUSTED ZONE: Generate Pre-Signed S3 PUT URL (Zero-Credential Access for Sandbox)
             try:
                 presigned_s3_url = await s3_client.generate_presigned_url(

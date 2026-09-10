@@ -41,10 +41,10 @@ class CloneStrategySelector:
 
     def select(
         self,
-        metadata: Union[RepoMetadata,RepoSizingInfo],
+        metadata: RepoSizingInfo,
         is_monorepo:bool = False,
         sparse_dir:Optional[list[str]] = None,
-        total_subprojects_detected :int = 0,
+        selected_subproject_bytes :int = 0,
     ) -> CloneConfig:
 
         "select Strategy for cloning the repo based on args"
@@ -52,7 +52,7 @@ class CloneStrategySelector:
         size_kb = metadata.size_kb
 
         if is_monorepo:
-            strategy = self._monorepo_strategy(metadata,sparse_dir,total_subprojects_detected)
+            strategy = self._monorepo_strategy(metadata,sparse_dir,selected_subproject_bytes)
         elif size_kb <= settings.REPO_SIZE_SMALL_KB:
             strategy = self._small_repo_strategy(metadata)
         elif size_kb <= settings.REPO_SIZE_MEDIUM_KB:
@@ -121,13 +121,15 @@ class CloneStrategySelector:
             self,
             metadata:Union[RepoMetadata,RepoSizingInfo],
             sparse_dirs:list[str],
-            total_subprojects_detected:int = 0,
+            selected_subproject_bytes:int = 0,
     ) -> CloneConfig:
         """
         Monorepo: partial clone + sparse checkout in cone mode.
         Only the approved sub-project directories are materialized.
         """
-        estimate_monorepo_size = self.estimate_monorepo_disk_mb(metadata.size_kb,sparse_dirs,total_subprojects_detected)
+        exact_mb = selected_subproject_bytes // (1024 *1024)
+        estimate_size = exact_mb + 50
+        
         return CloneConfig(
             strategy=CloneStrategy.SPARSE_CHECKOUT.value,
             depth=1,
@@ -136,11 +138,5 @@ class CloneStrategySelector:
             no_checkout=True,
             sparse_dirs=sparse_dirs,
             skip_lfs=metadata.uses_git_lfs,
-            estimated_disk_mb=estimate_monorepo_size
+            estimated_disk_mb=estimate_size
         )
-
-    def estimate_monorepo_disk_mb(metadata_size_kb: int, sparse_dirs: list[str],total_subprojects_detected:int) -> int:
-        denominator = max(total_subprojects_detected, len(sparse_dirs), 1)
-
-        size = (metadata_size_kb*len(sparse_dirs))/ (1024 * denominator)
-        return size
