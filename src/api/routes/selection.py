@@ -287,14 +287,50 @@ async def submit_selection(
             for sp in sm["subprojects"]:
                 valid_subprojects.add(sp["path"])
 
-    invalid_sp = set(payload.selected_subprojects) - valid_subprojects
+    selected_sp_paths = set(payload.selected_subprojects)
+    selected_sm_paths = set(payload.selected_submodules)
+
+    invalid_sp = selected_sp_paths - valid_subprojects
     if invalid_sp:
         raise HTTPException(status_code=422, detail=f"Selection vector configuration contains unauthorized path scopes: {sorted(invalid_sp)}")
     
-    invalid_sm = set(payload.selected_submodules) - valid_submodules
+    invalid_sm = selected_sm_paths - valid_submodules
     if invalid_sm:
          raise HTTPException(status_code=422, detail=f"Submodule path selection rejected due to insufficient account permissions or configuration properties: {sorted(invalid_sm)}")
 
+    # SCENARIO B: Sparse Checkout (Only pulling selected paths)
+    FREE_TIER_LIMIT_BYTES = 2 * 1024 * 1024 * 1024 # 2 GB
+
+    total_selection_bytes = 0
+
+    # 1. Sum up selected subprojects
+    for sp in scout_data.get("subprojects", []):
+        if sp["path"] in selected_sp_paths:
+            total_selection_bytes += sp.get("subproject_byte_count", 0)
+
+    # 2. Sum up selected submodules
+    for sm in scout_data.get("submodules", []):
+        if sm["path"] in selected_sm_paths:
+            nested_sps = sm.get("subprojects", [])
+            selected_nested_sps = [
+                nsp for nsp in nested_sps 
+                if nsp["path"] in selected_sp_paths
+            ]
+            if sm.get("is_monorepo") and selected_nested_sps:
+                for nsp in selected_nested_sps:
+                    total_selection_bytes += nsp.get("subproject_byte_count", 0)
+            else:
+                # User wants the whole submodule (or it's not a monorepo). Sum the whole thing.
+                total_selection_bytes += sm.get("estimated_source_bytes", 0)
+
+    # 3. Add a small buffer for Git metadata (.git folder overhead)
+    total_selection_bytes += 50_000_000  # 50MB buffer
+
+    if total_selection_bytes > FREE_TIER_LIMIT_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Selection footprint ({total_selection_bytes / (1024*1024):.2f} MB) exceeds the 2 GB free tier limit."
+        )
     # Raw high performance query mapping upsert execution pattern
     async with db_factory() as conn:
         selection_id = await conn.fetchval(
