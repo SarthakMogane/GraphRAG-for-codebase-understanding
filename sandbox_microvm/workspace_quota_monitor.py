@@ -133,4 +133,114 @@ class WorkspaceQuotaMonitor:
                     f"{self.filesystem_max_used_ratio:.2%}"
                 )
 
-   
+    # ------------------------------------------------------------------
+    # Workspace-specific monitoring
+    # ------------------------------------------------------------------
+
+    async def _enforce_workspace_quota(self) -> None:
+        """
+        os.walk() can be expensive for very large repositories.
+
+        Run it in a worker thread so that the synchronous filesystem walk
+        does not block the asyncio event loop.
+        """
+
+        await asyncio.to_thread(
+            self.ws.enforce_quota
+        )
+
+    # ------------------------------------------------------------------
+    # Monitor loop
+    # ------------------------------------------------------------------
+
+    async def _monitor_loop(self) -> None:
+        """
+        Fast filesystem check + slower workspace check.
+
+        If either check fails, store the exception and terminate the
+        monitor. The operation runner is responsible for cancelling
+        the Git/submodule operation.
+        """
+
+        next_workspace_check = 0.0
+
+        try:
+            loop = asyncio.get_running_loop()
+            next_workspace_check = loop.time()
+
+            while not self._stop_event.is_set():
+
+                # ------------------------------------------------------
+                # FAST CHECK
+                # ------------------------------------------------------
+
+                self._enforce_filesystem_limit()
+
+                # ------------------------------------------------------
+                # SLOWER WORKSPACE-SPECIFIC CHECK
+                # ------------------------------------------------------
+
+                now = loop.time()
+
+                if now >= next_workspace_check:
+                    await self._enforce_workspace_quota()
+
+                    next_workspace_check = (
+                        now + self.workspace_check_interval
+                    )
+
+                # Wait for stop or next fast check.
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=self.filesystem_check_interval,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+
+        except asyncio.CancelledError:
+            raise
+
+        except BaseException as exc:
+            self._failure = exc
+            logger.warning(
+                "Workspace quota monitor detected failure: %s",
+                exc,
+                exc_info=True,
+            )
+
+    async def start(self) -> None:
+        if self._task is not None:
+            raise RuntimeError("Quota monitor already started.")
+
+        self._stop_event.clear()
+        self._failure = None
+
+        self._task = asyncio.create_task(
+            self._monitor_loop(),
+            name=f"workspace-quota-monitor-{self.ws.job_id}",
+        )
+
+    async def stop(self) -> None:
+        """
+        Stop the monitor.
+
+        Does not perform the final quota check. The operation runner
+        performs that explicitly after the operation finishes.
+        """
+
+        self._stop_event.set()
+
+        if self._task is not None:
+            await self._task
+            self._task = None
+
+    def check_failure(self) -> None:
+        """
+        Raise the monitor's failure, if one occurred.
+        """
+
+        if self._failure is not None:
+            raise self._failure
+
+
