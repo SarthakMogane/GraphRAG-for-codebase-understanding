@@ -40,22 +40,24 @@ class JobWorkspace:
         max_byte:int = DEFAULT_MAX_WORKSPACE_BYTE,
 
     ):
-        self.job_id = str(job_id),
-        self.account_id = str(account_id),
-        self._base_dir = Path(base_dir),
-        self.max_byte = max_byte,
+        self.job_id = str(job_id)
+        self.account_id = str(account_id)
+        self._base_dir = Path(base_dir)
+        self.max_bytes = max_byte
         self._root: Optional[Path] = None
 
     #Lifecycle
 
     async def __aenter__(self) -> JobWorkspace:
-        self._root = self._create_root_dir
+        self._root = self._create_root_dir()
         self._create_subdir("clone")
         self._create_subdir("manifest")
-        self._create_subdir("temp")
+        self._create_subdir("tmp")
 
+        return self
+    
     async def __aexit__(self, exc_type, exc_val, exc_tb) ->None:
-        self._distroy_root_dir
+        self._destroy_root_dir()
         if exc_type is not None:
             logger.warning("Workspace closed after error: Job_id:%s error=%s, detailed=%s",self.job_id,exc_val,exc_tb)
         else:
@@ -69,7 +71,7 @@ class JobWorkspace:
         a stale directory from a crashed prior run can never be reused
         by accident.
         """
-        self._base_dir.mkdir(parent=True ,exist_ok = True)
+        self._base_dir.mkdir(parents=True ,exist_ok = True)
         root_str = tempfile.mkdtemp(
             prefix=f"job-{self.job_id}-",
             dir=self._base_dir
@@ -79,7 +81,7 @@ class JobWorkspace:
 
         return root
 
-    def _distroy_root_dir(self)-> None:
+    def _destroy_root_dir(self)-> None:
         """
         Remove the entire workspace tree. Called unconditionally on exit.
         ignore_errors=True because a half-written malicious repo could in
@@ -105,7 +107,7 @@ class JobWorkspace:
         might originate from repo content (file paths from git, submodule
         names, etc.) — those are attacker-controlled strings.
         """
-        candidate = self._root.joinpath(subdir,*parts)
+        candidate = self.root.joinpath(subdir,*parts)
         return self._validate_contained(candidate)
 
     def _validate_contained(self, candidate:Path) -> Path:
@@ -118,7 +120,7 @@ class JobWorkspace:
         happens, rather than trusting git's own (sometimes buggy) path
         validation.
         """
-        resolved_root = self._root.resolve()
+        resolved_root = self.root.resolve()
         try:
             resolved_candidate = candidate.resolve()
         except (OSError,RuntimeError) as e:
@@ -152,12 +154,13 @@ class JobWorkspace:
         after it has already exhausted disk.
         """
         total = 0 
-        for dirpath, _dirname,filenames in os.walk(self._root):
+        for dirpath, _dirname,filenames in os.walk(self.root):
             for name in filenames:
                 fp = os.path.join(dirpath,name)
                 try:
-                    if not os.path.islink(fp):
-                        total += os.path.getsize(fp)
+                    stat_result = os.lstat(fp)
+                    if not stat.S_ISLNK(stat_result.st_mode):
+                        total += stat_result.st_size
                 except OSError:
                     continue
         return total
@@ -169,12 +172,21 @@ class JobWorkspace:
         each submodule init, periodically during file filtering).
         """
         size = self.current_size_bytes()
-        if size > self.max_byte:
+        if size > self.max_bytes:
             raise WorkspaceQuotaExceeded(
                 f"Workspace for job={self.job_id} reached {size} bytes "
                 f"(limit {self.max_bytes}) — aborting to protect the "
                 f"task's disk."
             )
+
+    @property
+    def root(self) -> Path:
+        if self._root is None:
+            raise RuntimeError(
+                f"Workspace has not been entered: job={self.job_id}"
+            )
+
+        return self._root
 
     # Convenience accessors  
     @property
