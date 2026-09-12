@@ -47,9 +47,11 @@ from typing import Optional
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from sandbox_microvm.workspace import JobWorkspace
+from sandbox_microvm.workspace import JobWorkspace,WorkspaceQuotaExceeded,WorkspacePathViolation
+from sandbox_microvm.workspace_quota_monitor import run_with_quota_monitor , FilesystemSpaceExceeded
 from src.services.github import RepoMetadata
-from src.services.git_clone_service import GitCloneService
+from src.services.git_clone_service import GitCloneService,UnsafeGitVersionError,CloneError
+
 
 logger = logging.getLogger("sandbox_app")
 logging.basicConfig(level=logging.INFO)
@@ -80,7 +82,7 @@ async def status_stream():
     async def event_generator():
         # 1. Yield snapshot immediately to recover lost events on reconnect
         yield f"data: {json.dumps(_job_state)}\n\n"
-        if _job_state["phase"] in ("VM_WORK_COMPLETED", "PARSING_COMPLETED", "FAILED"):
+        if _job_state["phase"] in ("VM_WORK_COMPLETED", "FAILED"):
             return
         while True:
             try:
@@ -211,25 +213,68 @@ async def _run_job(payload:dict):
     owner         = payload["owner"]
     repo          = payload["repo"]
     branch        = payload.get("branch", "main")
-    clone_configs   = payload.get("clone_configs", [])
+    clone_config   = payload.get("clone_config", {})
     submodules    = payload.get("submodules", [])
     github_token  = payload["github_token"]
     presigned_url = payload["presigned_url"]
     image_version = payload["image_version"]
 
     try:
-        async with JobWorkspace(job_id=job_id,account_id=account_id,base_dir="/temp/ingestion") as ws:
+        async with JobWorkspace(
+            job_id=job_id,account_id=account_id,base_dir="/temp/ingestion",
+            max_byte=2 * 1024 * 1024 * 1024,  # 2 GiB limit
+        ) as ws:
+            
             home_dir = ws.tmp_dir
             target_dir = ws.clone_dir
 
-            await _clone_svc.clone(
-                owner=owner,
-                repo=repo,
-                clone_config=clone_configs,
-                home_dir=home_dir,
-                target_dir=target_dir,
-                auth_token=github_token)
+            await _emit_phase("CLONING")
+            await run_with_quota_monitor(
+                _clone_svc.clone(
+                    owner=owner,
+                    repo=repo,
+                    clone_config=clone_config,
+                    home_dir=home_dir,
+                    target_dir=target_dir,
+                    auth_token=github_token),
+                ws,
+                filesystem_check_interval=1.0,
+                workspace_check_interval=5.0,
+                filesystem_min_free_bytes=512 * 1024 * 1024,
+                # filesystem_max_used_ratio=0.88
+            )
+            # Mandatory post-clone validation.
+            ws.enforce_quota()
 
+            # 2. Submodule Ingestion Phase (Runs after main clone succeeds)
+            if submodules:
+                await _emit_phase("SUBMODULE_CLONING")
 
-    except:
-        pass
+                await run_with_quota_monitor(
+                    _clone_svc.init_submodules(
+                        repo_path=target_dir,
+                        selected_submodules=submodules,
+                        auth_token=github_token,
+                        home_dir=home_dir,
+                        jobs=2     
+                    ),
+                    ws,
+                    filesystem_check_interval=1.0,
+                    workspace_check_interval=5.0,
+                    filesystem_min_free_bytes=512 * 1024 * 1024,
+                )
+                ws.enforce_quota()
+
+    except (WorkspacePathViolation, WorkspaceQuotaExceeded, FilesystemSpaceExceeded) as e:
+        logger.error("Job %s hit storage/resource limits: %s", job_id, e)
+        await _emit_phase("FAILED", error=f"Storage limit exceeded: {e}")
+
+    except (CloneError, UnsafeGitVersionError) as e:
+        logger.error("Job %s failed during git execution: %s", job_id, e)
+        await _emit_phase("FAILED", error=f"Git operation failed: {e}")
+    except Exception as e:
+        # Log the full stack trace to CloudWatch for debugging
+        logger.exception("Job %s failed during phase %s", job_id, _job_state["phase"]) 
+        error_msg = str(e) if str(e) else type(e).__name__
+        # Emit the terminal FAILED event so the orchestrator knows to tear this MicroVM down
+        await _emit_phase("FAILED", error=error_msg)
