@@ -537,7 +537,33 @@ class GitCloneService:
                 start_new_session=True,
 
             )
-            
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout= timeout_seconds
+                )
+
+            except asyncio.TimeoutError() as e:
+                logger.warning(
+                    "Git command timeout after %ss: %s",
+                    timeout_seconds,
+                    " ".join(redacted_cmd)
+                )
+                await self._terminate_process_tree(process)
+
+                raise CloneError(
+                    f"Git command Timed Out after {timeout_seconds}s :",
+                    f"{" ".join(redacted_cmd)}"
+                ) from e
+
+            except asyncio.CancelledError:
+                logger.warning(
+                    "Git command cancelled: %s",
+                    " ".join(redacted_cmd),
+                )
+                await self._terminate_process_tree(process)
+
+                raise
 
             stdout_text = (
                 stdout.decode(errors="replace")
