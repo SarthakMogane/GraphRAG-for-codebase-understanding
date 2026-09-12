@@ -34,6 +34,7 @@ specifically:
 """
 import subprocess
 import os
+import signal
 import re
 import base64
 import tempfile
@@ -517,37 +518,69 @@ class GitCloneService:
         that a deliberately hostile repo can tie up a worker slot for
         an unbounded amount of time.
         """
-        logger.debug("Running: %s (cwd=%s)", " ".join(self._redact_for_log(cmd)), cwd)
+        redacted_cmd = self._redact_for_log(cmd)
+        logger.debug("Running: %s (cwd=%s)", " ".join(redacted_cmd), cwd)
+
+        process: asyncio.subprocess.Process | None = None
         
-        loop = asyncio.get_event_loop()
         try:
-            result = await loop.run_in_executor(
-                None, lambda:subprocess.run(
-                    cmd,
-                    cwd=str(cwd) if cwd else None,
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_seconds
+            process = await asyncio.create_subprocess_exec(    
+                cmd,
+                cwd=str(cwd) if cwd else None,
+                env=env,
+                stdout=(
+                asyncio.subprocess.PIPE
+                if capture_output
+                else asyncio.subprocess.DEVNULL
+                ),
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
 
-
-                )
             )
-        except subprocess.TimeoutExpired as e:
-            raise CloneError(
-                f"Git command timed out after {timeout_seconds}s:{' '.join(cmd)}"
-                ) from e
-
-        if result.returncode !=0:
-            redacted_cmd = " ".join(self._redact_for_log(cmd))
-            redacted_stderr = self._redact_text(result.stderr) # Sanitize token strings in stderr
             
-            raise CloneError(
-                f"Git command failed (exit {result.returncode}): {redacted_cmd}\n"
-                f"stderr: {redacted_stderr}"
+
+            stdout_text = (
+                stdout.decode(errors="replace")
+                if stdout is not None
+                else ""
             )
 
-        return result
+            stderr_text = (
+                stderr.decode(errors="replace")
+                if stderr is not None 
+                else ""
+            )
+
+            if process.returncode!=0:
+                redacted_stderr = self._redact_text(stderr)
+
+                raise CloneError(
+                    f"Git command failed "
+                    f"(exit {process.returncode}): "
+                    f"{' '.join(redacted_cmd)}\n"
+                    f"stderr: {redacted_stderr}"
+                )
+
+            return (
+                process.returncode,
+                stdout_text,
+                stderr_text,
+            )
+
+        except asyncio.CancelledError:
+            # Covers cancellation that happens before communicate()
+            # is entered or during process creation.
+            if process is not None:
+                await self._terminate_process_tree(process)
+
+            raise
+
+        except OSError as exc:
+            raise CloneError(
+                f"Failed to start Git command: "
+                f"{' '.join(redacted_cmd)}: {exc}"
+            ) from exc
+            
 
     def _redact_for_log(self, cmd: list[str]) -> list[str]:
         """
@@ -604,3 +637,48 @@ class GitCloneService:
             sanitized = pattern.sub(replacement, sanitized)
 
         return sanitized
+
+    def _terminate_process_tree(
+            self,
+            process:asyncio.subprocess.Process,
+    )-> None:
+        """
+        Terminate Git and its children.
+
+        start_new_session=True gives Git its own process group.
+
+        This matters because Git can create child processes such as
+        ssh, credential helpers, git-upload-pack, etc.
+        """
+
+        if process.returncode is not None:
+            return
+
+        try:
+            os.killpg(
+                process.pid,
+                signal.SIGTREM
+            )
+
+        except ProcessLookupError:
+            return
+
+        try:
+            asyncio.wait_for(
+                process.wait(),
+                timeout=5,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Git process did not terminate gracefully; killing: pid=%s",
+                process.pid,
+            )
+            try:
+                os.killpg(
+                    process.pid,
+                    signal.SIGTERM
+                    )
+            except ProcessLookupError:
+                pass
+
+            process.wait()
