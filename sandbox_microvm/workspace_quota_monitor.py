@@ -244,3 +244,103 @@ class WorkspaceQuotaMonitor:
             raise self._failure
 
 
+async def run_with_quota_monitor(
+    operation: Awaitable,
+    workspace,
+    *,
+    filesystem_check_interval: float = 1.0,
+    workspace_check_interval: float = 10.0,
+    filesystem_min_free_bytes: int | None = None,
+    filesystem_max_used_ratio: float | None = None,
+):
+    """
+    Run a long-running operation while monitoring workspace resources.
+
+    If the monitor detects a quota violation, the operation task is
+    cancelled.
+
+    IMPORTANT:
+    The underlying operation should therefore be implemented so that
+    cancellation terminates its subprocesses (Git, etc.).
+    """
+
+    operation_task = asyncio.create_task(
+        operation,
+        name=f"workspace-operation-{workspace.job_id}",
+    )
+
+    monitor = WorkspaceQuotaMonitor(
+        workspace,
+        filesystem_check_interval=filesystem_check_interval,
+        workspace_check_interval=workspace_check_interval,
+        filesystem_min_free_bytes=filesystem_min_free_bytes,
+        filesystem_max_used_ratio=filesystem_max_used_ratio,
+    )
+
+    await monitor.start()
+
+    try:
+        while True:
+
+            done, _pending = await asyncio.wait(
+                {
+                    operation_task,
+                    monitor._task,
+                },
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # ----------------------------------------------------------
+            # Operation finished first
+            # ----------------------------------------------------------
+
+            if operation_task in done:
+
+                # Propagate clone/submodule exception if any.
+                result = operation_task.result()
+
+                # Stop monitoring.
+                await monitor.stop()
+
+                # Final workspace-specific check.
+                await asyncio.to_thread(
+                    workspace.enforce_quota
+                )
+
+                return result
+
+            # ----------------------------------------------------------
+            # Monitor finished first
+            # ----------------------------------------------------------
+
+            if monitor._task in done:
+
+                # If monitor exited because of a quota/resource failure,
+                # terminate the operation.
+                monitor.check_failure()
+
+                # Unexpected monitor termination.
+                raise RuntimeError(
+                    "Workspace quota monitor stopped unexpectedly."
+                )
+
+    finally:
+            
+        if not operation_task.done():
+            operation_task.cancel()
+
+            try:
+                await operation_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Operation raised while being cancelled.")
+
+        # Stop monitor.
+        try:
+            await monitor.stop()
+        except Exception:
+            logger.exception(
+                "Failed to stop workspace quota monitor."
+            )
+        
