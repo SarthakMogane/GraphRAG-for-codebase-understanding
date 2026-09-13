@@ -80,9 +80,9 @@ class CommitSummary(BaseModel):
 # ── Custom Exceptions ─────────────────────────────────────────────────────────
 class GitHubAPIError(Exception):
     """Base custom exception class for all GithubAPI error"""
-    def __init__(self,message:str,code:Optional[int] = None):
+    def __init__(self,message:str,status_code:Optional[int] = None):
         super().__init__(message)
-        self.status_code = code
+        self.status_code = status_code
 
 class RateLimitError(GitHubAPIError):
     """Raised when GitHub API rate limit buffer is reached."""
@@ -123,7 +123,7 @@ def should_retry_httpx_error(exception: BaseException) -> bool:
     # Retry transient server errors
     if isinstance(exception,GitHubAPIError):
         
-        status = exception.response.status_code
+        status = exception.status_code
         if status in (429,500,502,503,504):
             return True
             

@@ -32,6 +32,9 @@ class CloneConfig:
     recurse_submodule:bool = False
     estimated_disk_mb:int = 0 
     pinned_sha: Optional[str] = None
+    # Runtime policy
+    git_operation_timeout_seconds: int = 300
+    git_retry_attempts: int = 2 #1 no retry , 2 one retry
 
 class CloneStrategySelector:
     """
@@ -61,8 +64,10 @@ class CloneStrategySelector:
             strategy = self._large_repo_strategy(metadata)
 
         logger.info(
-        "Clone strategy selected for %s/%s: strategy=%s size_kb=%d skip_lfs=%s",
-        metadata.owner, metadata.name, strategy.strategy.value, size_kb,strategy.skip_lfs
+        "Clone strategy selected for %s/%s: strategy=%s size_kb=%d skip_lfs=%s operation_timeout=%s,git_retry_attempts:%s",
+        metadata.owner, metadata.name, strategy.strategy.value, size_kb,strategy.skip_lfs,
+        strategy.git_operation_timeout_seconds,
+        strategy.git_retry_attempts,
         )
 
         return strategy
@@ -79,7 +84,9 @@ class CloneStrategySelector:
             single_branch=True,
             filter_blob_none=False,
             skip_lfs=metadata.uses_git_lfs,
-            estimated_disk_mb=metadata.size_kb//1024
+            estimated_disk_mb=metadata.size_kb//1024,
+            git_operation_timeout_seconds=180,
+            git_retry_attempts=2,
         )
 
     def _medium_repo_strategy(self, metadata:RepoMetadata) -> CloneConfig:
@@ -97,7 +104,10 @@ class CloneStrategySelector:
             filter_blob_none=True,
             no_checkout=True,
             skip_lfs=metadata.uses_git_lfs,
-            estimated_disk_mb=(metadata.size_kb*retention)//(1048*100)
+            estimated_disk_mb=(metadata.size_kb*retention)//(1048*100),
+            git_operation_timeout_seconds=300,
+            git_retry_attempts=2,
+            
         )
 
     def _large_repo_strategy(self, metadata:RepoMetadata) -> CloneConfig:
@@ -115,6 +125,8 @@ class CloneStrategySelector:
             no_checkout=True,          # --no-checkout: tree on disk but no files
             skip_lfs=True,
             estimated_disk_mb=settings.CLONE_LARGE_REPO_SKELETON_MB,      # Minimal until sparse checkout expands
+            git_operation_timeout_seconds=600,
+            git_retry_attempts=2
         )
 
     def _monorepo_strategy(
@@ -138,5 +150,7 @@ class CloneStrategySelector:
             no_checkout=True,
             sparse_dirs=sparse_dirs,
             skip_lfs=metadata.uses_git_lfs,
-            estimated_disk_mb=estimate_size
+            estimated_disk_mb=estimate_size,
+            git_operation_timeout_seconds=600,
+            git_retry_attempts=2
         )

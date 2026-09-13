@@ -117,7 +117,7 @@ class GitCloneService:
         auth_flag = self._auth_header_flag(auth_token)
         dest = Path(target_dir)
         home_dir.mkdir(parents=True ,exist_ok=True)
-        dest.mkdir(parents=True , exist_ok=True)
+        dest.parent.mkdir(parents=True , exist_ok=True)
 
         # //strategy execution
         try:
@@ -150,7 +150,7 @@ class GitCloneService:
             str(dest),
         )
         env = self._build_env(clone_config,home_dir)
-        await self._run(cmd,env=env)
+        await self._run(cmd,env=env,timeout_seconds=clone_config.git_operation_timeout_seconds)
 
     async def _clone_partial(
             self,url:str,dest:Path,config:CloneConfig,home_dir:Path,
@@ -175,13 +175,14 @@ class GitCloneService:
             str(dest),   
         )
         env = self._build_env(config,home_dir)
-        await self._run(cmd=cmd,env=env)
+        await self._run(cmd=cmd,env=env,timeout_seconds=config.git_operation_timeout_seconds)
 
         if config.no_checkout:
             await self._run(
                 self._git_cmd("checkout"),
                 cwd=dest,
                 env=env,
+                timeout_seconds=config.git_operation_timeout_seconds,
             )
 
     async def _clone_sparse(
@@ -211,13 +212,14 @@ class GitCloneService:
             str(dest),
         )
         env= self._build_env(config,home_dir=home_dir)
-        await self._run(cmd_clone,env=env)
+        await self._run(cmd_clone,env=env,timeout_seconds=config.git_operation_timeout_seconds)
 
          #  Initialize sparse checkout in cone mode
         await self._run(
             self._git_cmd("sparse-checkout","init","--cone"),
             cwd=dest,
             env=env,
+            timeout_seconds=config.git_operation_timeout_seconds,
         )
         # Set which directories to include
         dirs_to_include = config.sparse_dirs or []
@@ -225,6 +227,7 @@ class GitCloneService:
             self._git_cmd("sparse-checkout","set",*dirs_to_include),
             cwd=dest,
             env=env,
+            timeout_seconds=config.git_operation_timeout_seconds
         )
 
         #  Checkout — only the specified directories land on disk
@@ -232,6 +235,7 @@ class GitCloneService:
             self._git_cmd("checkout"),
             cwd=dest,
             env=env,
+            timeout_seconds=config.git_operation_timeout_seconds
         )
 
         logger.info(
@@ -281,7 +285,11 @@ class GitCloneService:
             batch_config = CloneConfig(
                 strategy=CloneStrategy.PARTIAL_BLOB if use_blob_filter else CloneStrategy.SHALLOW,
                 skip_lfs=should_skip_lfs,
-                filter_blob_none=use_blob_filter
+                filter_blob_none=use_blob_filter,
+                git_operation_timeout_seconds=(
+                    300 if use_blob_filter else 180
+                ),
+                git_retry_attempts=2,
             )
 
             batch_env = self._build_env(batch_config, home_dir)
@@ -304,7 +312,7 @@ class GitCloneService:
             )
             
             logger.info("Initializing %d normal submodules in parallel", len(normal_paths))
-            await self._run(cmd=cmd, cwd=repo_path, env=batch_env)
+            await self._run(cmd=cmd, cwd=repo_path, env=batch_env,timeout_seconds=batch_config.git_operation_timeout_seconds)
 
         # ── BRANCH B: MONOREPO SUBMODULES (Custom Parallel Sparse Clone) ──
         if monorepo_subs:
@@ -347,8 +355,17 @@ class GitCloneService:
             strategy=strategy_str,
             skip_lfs=clone_cfg_dict.get("skip_lfs", False),
             pinned_sha=clone_cfg_dict.get("pinned_sha"),
-            sparse_dirs=clone_cfg_dict.get("sparse_dirs", [])
-        )
+            sparse_dirs=clone_cfg_dict.get("sparse_dirs", []),
+            git_operation_timeout_seconds=clone_cfg_dict.get(
+                "git_operation_timeout_seconds",
+                600,
+            ),
+            git_retry_attempts=clone_cfg_dict.get(
+                "git_retry_attempts",
+                2,
+            ),
+                )
+        timeout_seconds=sub_clone_config.git_operation_timeout_seconds
 
         env = self._build_env(sub_clone_config,home_dir=home_dir)
 
@@ -368,21 +385,21 @@ class GitCloneService:
             "clone", "--filter=blob:none", "--no-checkout",
             url, str(target_dir)
         )
-        await self._run(cmd=clone_cmd, cwd=repo_path, env=env)
+        await self._run(cmd=clone_cmd, cwd=repo_path, env=env, timeout_seconds=timeout_seconds)
 
         # 3. Initialize sparse-checkout in cone mode
         sparse_init_cmd = self._git_cmd("sparse-checkout", "init", "--cone")
-        await self._run(cmd=sparse_init_cmd, cwd=target_dir, env=env)
+        await self._run(cmd=sparse_init_cmd, cwd=target_dir, env=env, timeout_seconds=timeout_seconds)
 
         # 4. Set the selected subproject directories
         sparse_set_cmd = self._git_cmd("sparse-checkout", "set", *sparse_dirs)
-        await self._run(cmd=sparse_set_cmd, cwd=target_dir, env=env)
+        await self._run(cmd=sparse_set_cmd, cwd=target_dir, env=env, timeout_seconds=timeout_seconds)
 
         # 5. Check out the Pinned SHA!
         # This is where pinned_sha is crucially used in the commands.
         target_ref = sub_clone_config.pinned_sha if sub_clone_config.pinned_sha else "HEAD"
         checkout_cmd = self._git_cmd("checkout", target_ref)
-        await self._run(cmd=checkout_cmd, cwd=target_dir, env=env)
+        await self._run(cmd=checkout_cmd, cwd=target_dir, env=env, timeout_seconds=timeout_seconds)
         
         logger.info(f"Successfully sparse-cloned monorepo submodule '{submodule["path"]}' at {target_ref}")
 
@@ -507,7 +524,7 @@ class GitCloneService:
             cwd:Optional[Path] = None,
             env:Optional[dict] = None,
             capture_output:bool = False,
-            timeout_seconds:int = 120, #update for dynamic timeout.
+            timeout_seconds:int = 300, #update for dynamic timeout.
     )-> subprocess.CompletedProcess:
         """
         Run a git command asynchronously via asyncio subprocess.
@@ -664,7 +681,7 @@ class GitCloneService:
 
         return sanitized
 
-    def _terminate_process_tree(
+    async def _terminate_process_tree(
             self,
             process:asyncio.subprocess.Process,
     )-> None:
@@ -683,7 +700,7 @@ class GitCloneService:
         try:
             os.killpg(
                 process.pid,
-                signal.SIGTREM
+                signal.SIGTERM
             )
 
         except ProcessLookupError:
