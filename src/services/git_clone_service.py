@@ -32,6 +32,7 @@ specifically:
   6. Git version is checked once at construction against the patched
      versions for CVE-2025-48384.
 """
+import shutil
 import subprocess
 import os
 import signal
@@ -119,20 +120,87 @@ class GitCloneService:
         home_dir.mkdir(parents=True ,exist_ok=True)
         dest.parent.mkdir(parents=True , exist_ok=True)
 
-        # //strategy execution
-        try:
-            if clone_config.strategy == CloneStrategy.SPARSE_CHECKOUT.value:
-                await self._clone_sparse(clone_url,dest,clone_config,home_dir,auth_flag)
-            elif clone_config.strategy == CloneStrategy.PARTIAL_BLOB.value:
-                await self._clone_partial(clone_url,dest,clone_config,home_dir,auth_flag)
-            else:
-                await self._clone_shallow(clone_url,dest,clone_config,home_dir,auth_flag)
+        max_attempts = max(
+            1,
+            int(clone_config.git_retry_attempts),
+        )
 
-            logger.info("Clone complete: %s/%s → %s", owner, repo, dest)
-            return dest
-        except Exception as e:
-            raise CloneError(f"Clone failed for {owner}/{repo}: {e}") from e
-        
+        for attempt in range(1,max_attempts+1):
+                
+            # //strategy execution
+            try:
+                if attempt > 1:
+                    await self._remove_partial_clone(dest)
+
+                dest.mkdir(parents=True, exist_ok=True)
+
+                logger.info(
+                    "Git clone attempt %d/%d for %s/%s "
+                    "strategy=%s timeout=%ss",
+                    attempt,
+                    max_attempts,
+                    owner,
+                    repo,
+                    clone_config.strategy,
+                    clone_config.git_operation_timeout_seconds,
+                )
+
+                if clone_config.strategy == CloneStrategy.SPARSE_CHECKOUT.value:
+                    await self._clone_sparse(clone_url,dest,clone_config,home_dir,auth_flag)
+                elif clone_config.strategy == CloneStrategy.PARTIAL_BLOB.value:
+                    await self._clone_partial(clone_url,dest,clone_config,home_dir,auth_flag)
+                else:
+                    await self._clone_shallow(clone_url,dest,clone_config,home_dir,auth_flag)
+
+                logger.info("Clone complete: %s/%s → %s", owner, repo, dest)
+                return dest
+
+            except asyncio.CancelledError:
+                raise 
+
+            except CloneError as exc:
+                if not exc.retyable:
+                    raise
+
+                if attempt > max_attempts:
+                    logger.error(
+                        "Git clone exhausted local retries for %s/%s: %s",
+                        owner,repo,exc,
+                    )
+
+                    # The failure was transient, but we exhausted the
+                    # local retry budget.
+                    raise CloneError(
+                        f"Git clone failed after {attempt} attempts "
+                        f"for {owner}/{repo}: {exc}",
+                        retryable=True,
+                    ) from exc
+
+                # Small exponential backoff:
+                # attempt 1 -> 1s
+                # attempt 2 -> 2s
+                # attempt 3 -> 4s
+                backoff_seconds = min(
+                    2 ** (attempt - 1),
+                    8,
+                )
+                logger.warning(
+                    "Transient Git failure for %s/%s. "
+                    "Retrying in %ss (%d/%d): %s",
+                    owner,repo,backoff_seconds,attempt,max_attempts,exc,
+                )
+
+                await asyncio.sleep(backoff_seconds)
+
+            except Exception as e:
+                raise CloneError(f"Clone failed for {owner}/{repo}: {e}") from e
+
+        raise CloneError(
+                f"Clone failed for {owner}/{repo}",
+                retryable=False,
+            )
+
+    
     async def _clone_shallow(
         self, url:str, dest:Path, clone_config:CloneConfig, home_dir:Path,
         auth_flag:list[str] 
@@ -569,8 +637,10 @@ class GitCloneService:
                 await self._terminate_process_tree(process)
 
                 raise CloneError(
-                    f"Git command Timed Out after {timeout_seconds}s :",
-                    f"{" ".join(redacted_cmd)}"
+                    f"Git command timed out after "
+                    f"{timeout_seconds}s: "
+                    f"{' '.join(redacted_cmd)}",
+                    retryable=True,
                 ) from e
 
             except asyncio.CancelledError:
@@ -595,19 +665,32 @@ class GitCloneService:
             )
 
             if process.returncode!=0:
-                redacted_stderr = self._redact_text(stderr)
+                redacted_stderr = self._redact_text(stderr_text)
 
+                if self._is_retryable_git_failure(
+                    returncode=process.returncode,
+                    stderr=redacted_stderr
+                ):
+                    raise CloneError(
+                        f"Transient Git failure "
+                        f"(exit={process.returncode}): "
+                        f"{redacted_stderr}",
+                        retryable=True,
+                    )
+                
                 raise CloneError(
                     f"Git command failed "
                     f"(exit {process.returncode}): "
                     f"{' '.join(redacted_cmd)}\n"
-                    f"stderr: {redacted_stderr}"
+                    f"stderr: {redacted_stderr}",
+                    retryable=False,
                 )
 
-            return (
-                process.returncode,
-                stdout_text,
-                stderr_text,
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=process.returncode,
+                stdout=stdout_text,
+                stderr=stderr_text,
             )
 
         except asyncio.CancelledError:
@@ -623,7 +706,122 @@ class GitCloneService:
                 f"Failed to start Git command: "
                 f"{' '.join(redacted_cmd)}: {exc}"
             ) from exc
-            
+
+    # Error classification
+    # =========================================================================
+
+    @staticmethod
+    def _is_retryable_git_failure(
+        returncode: int,
+        stderr: str,
+    ) -> bool:
+        """
+        Conservative classification of transient Git failures.
+
+        Retry:
+            network / remote service failures.
+
+        Do NOT retry:
+            auth
+            permission
+            repo-not-found
+            invalid commands
+            quota / disk failures
+            security errors
+        """
+
+        text = stderr.lower()
+
+        permanent_patterns = (
+            "repository not found",
+            "authentication failed",
+            "bad credentials",
+            "permission denied",
+            "access denied",
+            "could not read username",
+            "invalid username or password",
+            "invalid option",
+            "unknown option",
+            "unknown switch",
+            "unsafe repository",
+            "no space left on device",
+            "disk quota exceeded",
+            "not a git repository",
+            "does not exist",
+        )
+
+        if any(
+            pattern in text
+            for pattern in permanent_patterns
+        ):
+            return False
+
+        transient_patterns = (
+            "502",
+            "503",
+            "504",
+            "bad gateway",
+            "service unavailable",
+            "gateway timeout",
+            "connection reset",
+            "connection refused",
+            "connection timed out",
+            "operation timed out",
+            "could not resolve host",
+            "temporary failure in name resolution",
+            "network is unreachable",
+            "network failure",
+            "early eof",
+            "unexpected disconnect",
+            "remote end hung up",
+            "curl 5",
+            "curl 6",
+            "curl 7",
+            "curl 18",
+            "curl 28",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+        )
+
+        return any(
+            pattern in text
+            for pattern in transient_patterns
+        )  
+         
+    # Cleanup / logging
+
+    async def _remove_partial_clone(
+        self,
+        target_dir: Path,
+    ) -> None:
+        """
+        Remove a partial clone before retrying the clone strategy.
+        """
+
+        if not target_dir.exists():
+            return
+
+        logger.warning(
+            "Removing partial clone before retry: %s",
+            target_dir,
+        )
+
+        try:
+            await asyncio.to_thread(
+                shutil.rmtree,
+                target_dir,
+            )
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise CloneError(
+                f"Unable to clean partial clone "
+                f"{target_dir}: {exc}",
+                retryable=False,
+            ) from exc
+
 
     def _redact_for_log(self, cmd: list[str]) -> list[str]:
         """

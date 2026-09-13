@@ -269,9 +269,14 @@ async def _run_job(payload:dict):
         logger.error("Job %s hit storage/resource limits: %s", job_id, e)
         await _emit_phase("FAILED", error=f"Storage limit exceeded: {e}")
 
-    except (CloneError, UnsafeGitVersionError) as e:
-        logger.error("Job %s failed during git execution: %s", job_id, e)
+    except UnsafeGitVersionError as exc:
+        logger.error("Job %s running unsafe Git: %s",job_id,exc,)
+        await _emit_phase("FAILED",error=str(exc),)
+
+    except CloneError as e:
+        logger.error("Job %s failed during git execution:(retryable=%s) %s", job_id,e.retryable, e)
         await _emit_phase("FAILED", error=f"Git operation failed: {e}")
+
     except Exception as e:
         # Log the full stack trace to CloudWatch for debugging
         logger.exception("Job %s failed during phase %s", job_id, _job_state["phase"]) 
