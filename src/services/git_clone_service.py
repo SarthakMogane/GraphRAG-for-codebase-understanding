@@ -349,14 +349,23 @@ class GitCloneService:
             should_skip_lfs = any(
                 sub.get("clone_config", {}).get("skip_lfs", False) for sub in normal_subs
             )
+
+            timeout_seconds = max(
+                int(
+                    sub.get("clone_config", {}).get(
+                        "git_operation_timeout_seconds",
+                        180 if not use_blob_filter else 300,
+                    )
+                )
+                for sub in normal_subs
+            )
+
             # Build batch CloneConfig for the combined git submodule command
             batch_config = CloneConfig(
                 strategy=CloneStrategy.PARTIAL_BLOB if use_blob_filter else CloneStrategy.SHALLOW,
                 skip_lfs=should_skip_lfs,
                 filter_blob_none=use_blob_filter,
-                git_operation_timeout_seconds=(
-                    300 if use_blob_filter else 180
-                ),
+                git_operation_timeout_seconds=timeout_seconds,
                 git_retry_attempts=2,
             )
 
