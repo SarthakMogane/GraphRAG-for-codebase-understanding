@@ -360,13 +360,22 @@ class GitCloneService:
                 for sub in normal_subs
             )
 
+            retry_attempts = max(
+                int(
+                    sub.get("clone_config", {}).get(
+                        "git_retry_attempts",
+                        2,
+                    )
+                )
+                for sub in normal_subs
+            )
             # Build batch CloneConfig for the combined git submodule command
             batch_config = CloneConfig(
                 strategy=CloneStrategy.PARTIAL_BLOB if use_blob_filter else CloneStrategy.SHALLOW,
                 skip_lfs=should_skip_lfs,
                 filter_blob_none=use_blob_filter,
                 git_operation_timeout_seconds=timeout_seconds,
-                git_retry_attempts=2,
+                git_retry_attempts=retry_attempts,
             )
 
             batch_env = self._build_env(batch_config, home_dir)
@@ -389,8 +398,15 @@ class GitCloneService:
             )
             
             logger.info("Initializing %d normal submodules in parallel", len(normal_paths))
-            await self._run(cmd=cmd, cwd=repo_path, env=batch_env,timeout_seconds=batch_config.git_operation_timeout_seconds)
-
+            await self._run_with_retry(
+                cmd=cmd,
+                cwd=repo_path,
+                env=batch_env,
+                timeout_seconds=(
+                    batch_config.git_operation_timeout_seconds
+                ),
+                max_attempts=batch_config.git_retry_attempts,
+            )
         # ── BRANCH B: MONOREPO SUBMODULES (Custom Parallel Sparse Clone) ──
         if monorepo_subs:
             logger.info("Initializing %d monorepo submodules via sparse partial clone", len(monorepo_subs))
@@ -716,6 +732,81 @@ class GitCloneService:
                 f"{' '.join(redacted_cmd)}: {exc}"
             ) from exc
 
+    # Retry wrapper
+    # =========================================================================
+
+    async def _run_with_retry(
+        self,
+        *,
+        cmd: list[str],
+        cwd: Optional[Path],
+        env: Optional[dict[str, str]],
+        timeout_seconds: int,
+        max_attempts: int,
+    ) -> subprocess.CompletedProcess:
+        """
+        Retry ONE Git operation when the failure is classified as transient.
+
+        This is separate from clone() because submodule update and individual
+        sparse-submodule commands also need the same retry behavior.
+        """
+
+        max_attempts = max(
+            1,
+            int(max_attempts),
+        )
+
+        last_error: Optional[CloneError] = None
+
+        for attempt in range(
+            1,
+            max_attempts + 1,
+        ):
+            try:
+                return await self._run(
+                    cmd=cmd,
+                    cwd=cwd,
+                    env=env,
+                    timeout_seconds=timeout_seconds,
+                )
+
+            except asyncio.CancelledError:
+                raise
+
+            except CloneError as exc:
+                if not exc.retryable:
+                    raise
+
+                last_error = exc
+
+                if attempt >= max_attempts:
+                    break
+
+                backoff_seconds = min(
+                    2 ** (attempt - 1),
+                    8,
+                )
+
+                logger.warning(
+                    "Retrying Git operation in %ss "
+                    "(attempt %d/%d): %s",
+                    backoff_seconds,
+                    attempt,
+                    max_attempts,
+                    exc,
+                )
+
+                await asyncio.sleep(
+                    backoff_seconds
+                )
+
+        assert last_error is not None
+
+        raise CloneError(
+            f"Git operation failed after "
+            f"{max_attempts} attempts: {last_error}",
+            retryable=True,
+        ) from last_error
     # Error classification
     # =========================================================================
 
