@@ -175,8 +175,50 @@ async def run_hook(request:Request):
     actually learns about progress, not this hook's response.
     """
     body = await request.json()
-    payload = json.loads(body.get("runHookPayload","{}"))
+    payload_raw = json.loads(body.get("runHookPayload","{}"))
 
+    if isinstance(payload_raw, str):
+        try:
+            payload = json.loads(
+                payload_raw
+            )
+        except json.JSONDecodeError as exc:
+            logger.error(
+                "Invalid runHookPayload JSON: %s",
+                exc,
+            )
+
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "invalid_payload",
+                    "error": str(exc),
+                },
+            )
+
+    elif isinstance(payload_raw, dict):
+        payload = payload_raw
+
+    else:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "invalid_payload",
+                "error": "runHookPayload must be JSON object/string",
+            },
+        )
+
+    job_id = payload.get("job_id")
+
+    if not job_id:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "invalid_payload",
+                "error": "job_id is required",
+            },
+        )
+    
     _job_state.update(
         {
             "job_id":payload.get("job_id"),
@@ -204,6 +246,17 @@ async def _run_job_with_timeout(payload:dict)->None:
         logger.error("Job %s exceeded %ds -marking FAILED",payload.get("job_id"),JOB_TIMEOUT_SECONDS)
         _job_state["error"]=f"Job exceded {JOB_TIMEOUT_SECONDS}s timeout"
         _job_state["phase"]="FAILED"
+
+        await _emit_phase(
+            "FAILED",
+            error=(
+                f"Job exceeded "
+                f"{JOB_TIMEOUT_SECONDS}s timeout"
+            ),
+        )
+    except asyncio.CancelledError:
+        raise
+
 
 async def _run_job(payload:dict):
     "main job"
