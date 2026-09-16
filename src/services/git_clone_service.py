@@ -470,6 +470,18 @@ class GitCloneService:
         if not sparse_dirs:
             sparse_dirs = ["/"]
 
+        async def _run_command(cmd:list[str], cwd:Path)-> None:
+            await self._run_with_retry(
+                cmd=cmd,
+                cwd=cwd,
+                env=env,
+                timeout_seconds=(
+                    sub_clone_config.git_operation_timeout_seconds
+                ),
+                max_attempts=(
+                    sub_clone_config.git_retry_attempts
+                ),
+            )
         # 2. Partial clone graph (REQUIRED for sparse checkout)
         # We always use blob:none here regardless of CloneConfig, because fetching 
         # blobs before sparse-checkout defeats the purpose of sparse-checkout.
@@ -478,21 +490,21 @@ class GitCloneService:
             "clone", "--filter=blob:none", "--no-checkout",
             url, str(target_dir)
         )
-        await self._run(cmd=clone_cmd, cwd=repo_path, env=env, timeout_seconds=timeout_seconds)
+        await _run_command(cmd=clone_cmd,cwd=repo_path)
 
         # 3. Initialize sparse-checkout in cone mode
         sparse_init_cmd = self._git_cmd("sparse-checkout", "init", "--cone")
-        await self._run(cmd=sparse_init_cmd, cwd=target_dir, env=env, timeout_seconds=timeout_seconds)
+        await _run_command(cmd=sparse_init_cmd, cwd=target_dir)
 
         # 4. Set the selected subproject directories
         sparse_set_cmd = self._git_cmd("sparse-checkout", "set", *sparse_dirs)
-        await self._run(cmd=sparse_set_cmd, cwd=target_dir, env=env, timeout_seconds=timeout_seconds)
+        await _run_command(cmd=sparse_set_cmd, cwd=target_dir)
 
         # 5. Check out the Pinned SHA!
         # This is where pinned_sha is crucially used in the commands.
         target_ref = sub_clone_config.pinned_sha if sub_clone_config.pinned_sha else "HEAD"
         checkout_cmd = self._git_cmd("checkout", target_ref)
-        await self._run(cmd=checkout_cmd, cwd=target_dir, env=env, timeout_seconds=timeout_seconds)
+        await _run_command(cmd=checkout_cmd, cwd=target_dir)
         
         logger.info(f"Successfully sparse-cloned monorepo submodule '{submodule["path"]}' at {target_ref}")
 
