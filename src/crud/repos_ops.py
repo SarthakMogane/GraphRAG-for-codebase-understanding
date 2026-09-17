@@ -143,7 +143,7 @@ async def _get_owned_repo(
             FROM repos r
             INNER JOIN installations i
             ON i.id = r.installation_id 
-            WHERE github_repo_id = $1 
+            WHERE r.github_repo_id = $1 
             AND r.account_id = $2
             """,
             repo_id, 
