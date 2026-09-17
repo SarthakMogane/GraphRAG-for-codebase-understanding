@@ -65,11 +65,6 @@ async def run_scout(
         account_id,
         db_factory,
     )
-
-    if not repo:
-        raise HTTPException(status_code=404, detail="Repository not found")
-
-        # Prevents duplicate concurrent ingestion jobs for the same repo.
         # AWAITING_UI is allowed through — user may want to re-submit selections.
     
     if repo["index_status"] in BLOCKING_STATUSES: #need update 
@@ -118,7 +113,36 @@ async def run_scout(
                         "scout": cached_json,
                     }
 
-        
+        async with db_factory() as conn:
+            claimed = await conn.fetchrow(
+                """
+                UPDATE repos
+                SET
+                    index_status = 'scouting',
+                    updated_at = NOW()
+                WHERE id = $1
+                AND account_id = $2
+                AND index_status NOT IN (
+                    'pending',
+                    'scouting',
+                    'indexing',
+                    'submodules',
+                    'cloning',
+                    'filtering',
+                    'manifesting',
+                    'inaccessible'
+                )
+                RETURNING id
+                """,
+                repo["id"],
+                account_id,
+            )
+
+        if not claimed:
+            raise HTTPException(
+                status_code=409,
+                detail="Repository is currently being processed.",
+            )
         # ── Cache miss — run the scout ─────────────────────────────────────────────
     
         already_indexed = await _get_indexed_repos(db_factory)
