@@ -79,6 +79,7 @@ class SubprojectNode:
     score: float
     auto_selected: bool
     source_file_count: int
+    subproject_byte_count:int
     has_entry_point: bool
     dependent_count: int
     recent_commit_count: int
@@ -175,7 +176,7 @@ class DeepScout:
 
     Usage:
         cache  = InstallationCache(gh, installation_id)
-        scout  = DeepScout(gh, installation_id, already_indexed, install_cache=cache)
+        scout  = DeepScout(gh, installation_id, already_indexe_check, install_cache=cache)
         result = await scout.run("myorg", "myapp", "main")
     """
 
@@ -183,15 +184,11 @@ class DeepScout:
         self,
         github_service: GitHubService,
         installation_id: int,
-        already_indexed_repos: dict[str, int],
-        install_cache: Optional[InstallationCache] = None,
+        already_indexed_check: dict[str, int],
     ):
         self.gh              = github_service
         self.installation_id = installation_id
-        self.already_indexed = already_indexed_repos #update . 
-        self.install_cache   = install_cache or InstallationCache(
-            github_service, installation_id
-        )
+        self.already_indexed_check = already_indexed_check #update . 
         self._api_calls = 0
 
     async def run(self, owner: str, repo: str, branch: str) -> RepoScoutResult:
@@ -291,7 +288,7 @@ class DeepScout:
                 sum(1 for sp in subproject_nodes if sp.auto_selected)
             ),
             scout_duration_ms=elapsed_ms,
-            api_calls_made=self._api_calls + self.install_cache.call_count,
+            api_calls_made=self._api_calls,
             scout_warnings=all_warnings
         )
 
@@ -533,7 +530,9 @@ class DeepScout:
             ),sub_warnings
 
         # ── Already indexed → cross-link ──────────────────────────────────────
-        if repo_key in self.already_indexed:
+        linked_repo_id = await self.already_indexed_check(owner, repo)
+
+        if linked_repo_id is not None:
             return SubmoduleNode(
                 path=entry.path, name=entry.name,
                 resolved_owner=owner, resolved_repo=repo,
@@ -544,7 +543,7 @@ class DeepScout:
                 user_can_toggle=(depth == 1),
                 action_required=False, action_label=None, action_url=None,
                 skip_reason="Already indexed — will cross-link wikis",
-                linked_repo_id=self.already_indexed[repo_key], # upDATE high security needed . 
+                linked_repo_id=linked_repo_id, # upDATE high security needed . 
                 pinned_sha=pinned_sha,
             ),sub_warnings
 
@@ -581,13 +580,12 @@ class DeepScout:
         )
         is_mono = mono_result.is_monorepo if mono_result else False
 
+        auto_selected = False
         # ── Determine outcome and auto_selected ───────────────────────────────
         if is_mono:
             outcome       = SubmoduleOutcome.PRIVATE_MONOREPO  #update : need to chekc auto selecter . size ? 
-            auto_selected = True
         elif band in ("small", "medium"):
             outcome       = SubmoduleOutcome.PRIVATE_FULL
-            auto_selected = True
         else:
             b3 = await self._quick_b3_score(
                 owner, repo, entry.path, entry.name, sub_branch
@@ -855,6 +853,7 @@ class DeepScout:
                 score=sp.composite_score,
                 auto_selected=(sp.decision == SubProjectScore.FULL_INGEST),
                 source_file_count=sp.source_file_count,
+                subproject_byte_count=sp.subproject_byte_count,
                 has_entry_point=sp.has_entry_point,
                 dependent_count=sp.dependent_count,
                 recent_commit_count=sp.recent_commit_count,

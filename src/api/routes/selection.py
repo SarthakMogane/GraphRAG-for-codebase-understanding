@@ -16,6 +16,7 @@ The frontend navigates to the scout page and calls POST /scout.
 
 import logging
 import json
+from typing import Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from src.schemas.requests import SelectionPayload
@@ -26,7 +27,7 @@ from src.services.scout.deep_scout import DeepScout, RepoScoutResult as ScoutRes
 from src.services.github import GitHubService, InstallationCache
 from src.utils.services_helpers import get_github_service , AccountId
 from src.utils.scout_utils import _serialize_scout
-from  src.core.database import get_authed_read_db_dep , get_rls_tx_conn ,DbFactory
+from src.core.database import get_authed_read_db_dep , get_rls_tx_conn ,DbFactory
 from src.crud.repos_ops import _get_indexed_repos,_get_owned_repo,BLOCKING_STATUSES
 from src.crud.jobs import _execute_queue_insertion_raw
 from src.utils.services_helpers import get_current_account_id
@@ -144,18 +145,12 @@ async def run_scout(
                 detail="Repository is currently being processed.",
             )
         # ── Cache miss — run the scout ─────────────────────────────────────────────
-    
-        already_indexed = await _get_indexed_repos(db_factory)
         already_indexed_check = _make_already_indexed_check(db_factory, account_id)
-        # Create shared InstallationCache — passed to DeepScout so it can be
-        # reused by SubmoduleDecisionTree in Phase 3 (same org lookups, 0 extra calls)
-        install_cache = InstallationCache(gh, installation_id)
 
         scout = DeepScout(
             github_service=gh,
             installation_id=installation_id,
-            already_indexed_repos=already_indexed,
-            install_cache=install_cache,
+            already_indexed_check=already_indexed_check
         )
         result: ScoutResult = await scout.run(
             owner=repo["owner_login"],
@@ -451,8 +446,25 @@ async def confirm_and_ingest(
 
     return {"job_id": job_id, "message": "Phase 3 background ingestion task initialized successfully."}
 
+def _make_already_indexed_check(
+    db_factory: DbFactory,
+    account_id: UUID,
+):
+    async def check(owner: str, repo_name: str) -> Optional[int]:
+        async with db_factory() as conn:
+            await conn.fetchval(
+                """
+                SELECT id
+                FROM repos
+                WHERE account_id = $1
+                  AND owner_login = $2
+                  AND repo_name = $3
+                  AND index_status IN ('ready', 'stale')
+                LIMIT 1
+                """,
+                str(account_id),
+                owner,
+                repo_name,
+            )
 
-
-
-
-
+    return check
