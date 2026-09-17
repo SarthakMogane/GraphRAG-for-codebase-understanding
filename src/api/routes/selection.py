@@ -24,12 +24,13 @@ from src.core.config import get_settings
 from src.core.database import get_db
 from src.services.scout.deep_scout import DeepScout, RepoScoutResult as ScoutResult
 from src.services.github import GitHubService, InstallationCache
-from src.utils.services_helpers import get_github_service 
+from src.utils.services_helpers import get_github_service , AccountId
 from src.utils.scout_utils import _serialize_scout
 from  src.core.database import get_authed_read_db_dep , get_rls_tx_conn ,DbFactory
-from src.crud.repos_ops import _get_indexed_repos
+from src.crud.repos_ops import _get_indexed_repos,_get_owned_repo
 from src.crud.jobs import _execute_queue_insertion_raw
 from src.utils.services_helpers import get_current_account_id
+
 import asyncpg
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ router = APIRouter(prefix="/api",tags=["Selections"])
 @router.post("/repos/{repo_id}/scout")
 async def run_scout(
     repo_id: int,
+    account_id:AccountId,
     db_factory:DbFactory = Depends(get_rls_tx_conn),
     gh: GitHubService = Depends(get_github_service)
 ):
@@ -58,17 +60,13 @@ async def run_scout(
     """
     
     try:
+        repo = await _get_owned_repo(
+            repo_id,
+            account_id,
+            db_factory,
+        )
         async with db_factory() as conn:
-            repo = await conn.fetchrow(
-                    """ SELECT   r.id, r.full_name, r.owner_login, r.repo_name, r.default_branch,
-                                    r.index_status, r.last_scout_sha, r.installation_id, r.account_id,i.github_install_id
-                        FROM repos r
-                        LEFT JOIN installations i
-                        ON 
-                        i.id = r.installation_id
-                        WHERE github_repo_id = $1
-                         """,repo_id
-                    )  #update:FOR UPDATE NOWAIT is removed because for update is not applicable to the nullble side of outer join
+             #update:FOR UPDATE NOWAIT is removed because for update is not applicable to the nullble side of outer join
             if not repo:
                 raise HTTPException(status_code=404, detail="Repository not found")
 
@@ -130,7 +128,7 @@ async def run_scout(
         # ── Cache miss — run the scout ─────────────────────────────────────────────
     
         already_indexed = await _get_indexed_repos(db_factory)
-
+        already_indexed_check = _make_already_indexed_check(db_factory, account_id)
         # Create shared InstallationCache — passed to DeepScout so it can be
         # reused by SubmoduleDecisionTree in Phase 3 (same org lookups, 0 extra calls)
         install_cache = InstallationCache(gh, installation_id)
