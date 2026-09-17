@@ -5,7 +5,7 @@ from src.services.github import GitHubService
 from src.database.mock_db import MOCK_DB , MockRepository
 from src.models.database import RepoStatus
 from src.schemas.responses import IndexResponse
-from src.crud.repos_ops import _get_owned_repo ,apply_pipeline_result_to_db
+from src.crud.repos_ops import _get_owned_repo ,apply_pipeline_result_to_db,BLOCKING_STATUSES
 from src.crud.user import update_user_github_tokens
 from uuid import UUID
 import datetime
@@ -133,7 +133,7 @@ async def get_user_repos(
     async with read_conn() as conn:
         final_repos = await conn.fetch(
             """
-            SELECT id, github_repo_id, full_name, repo_name, owner_login, 
+            SELECT github_repo_id as id, full_name, repo_name, owner_login, 
                    private, index_status, default_branch, primary_language, size_kb, updated_at
             FROM repos 
             WHERE account_id = $1 AND index_status != 'inaccessible'
@@ -274,13 +274,6 @@ async def index_repo(
      # ── Reject if already actively processing ──────────────────────────────
     # Prevents duplicate concurrent ingestion jobs for the same repo.
     # AWAITING_UI is allowed through — user may want to re-submit selections.
-    BLOCKING_STATUSES = {
-        RepoStatus.SCOUTING.value,
-        RepoStatus.CLONING.value,
-        RepoStatus.FILTERING.value,
-        RepoStatus.SUBMODULES.value,
-        RepoStatus.MANIFESTING.value,
-    }
     current_status = repo["index_status"]
     if current_status in BLOCKING_STATUSES:
         raise HTTPException(

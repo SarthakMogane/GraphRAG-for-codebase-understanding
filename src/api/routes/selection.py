@@ -27,7 +27,7 @@ from src.services.github import GitHubService, InstallationCache
 from src.utils.services_helpers import get_github_service , AccountId
 from src.utils.scout_utils import _serialize_scout
 from  src.core.database import get_authed_read_db_dep , get_rls_tx_conn ,DbFactory
-from src.crud.repos_ops import _get_indexed_repos,_get_owned_repo
+from src.crud.repos_ops import _get_indexed_repos,_get_owned_repo,BLOCKING_STATUSES
 from src.crud.jobs import _execute_queue_insertion_raw
 from src.utils.services_helpers import get_current_account_id
 
@@ -59,39 +59,32 @@ async def run_scout(
     Expected latency on cache hit:  < 50ms.
     """
     
-    try:
-        repo = await _get_owned_repo(
-            repo_id,
-            account_id,
-            db_factory,
-        )
-        async with db_factory() as conn:
-             #update:FOR UPDATE NOWAIT is removed because for update is not applicable to the nullble side of outer join
-            if not repo:
-                raise HTTPException(status_code=404, detail="Repository not found")
-
-            if repo["index_status"] in ("scouting", "indexing","submodules","cloning","filtering","manifesting"
-                                        ,"inaccessible"): #need update 
-                raise HTTPException(
-                    status_code=409, 
-                    detail=f"Action locked: Repository is currently in '{repo['index_status']}' status."
-                )
-
-            installation_id = repo["github_install_id"]
-            if not installation_id:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Repository verification halted: No GitHub App installation context bound.",
-                )
-
-            await conn.execute("UPDATE repos SET index_status = 'scouting', updated_at = NOW() WHERE id = $1", repo["id"])
-
-    except asyncpg.LockNotAvailableError:
-            raise HTTPException(
-                status_code=409, 
-                detail="Repository is currently being locked and modified by another worker process."
-            )
     
+    repo = await _get_owned_repo(
+        repo_id,
+        account_id,
+        db_factory,
+    )
+
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+        # Prevents duplicate concurrent ingestion jobs for the same repo.
+        # AWAITING_UI is allowed through — user may want to re-submit selections.
+    
+    if repo["index_status"] in BLOCKING_STATUSES: #need update 
+        raise HTTPException(
+            status_code=409, 
+            detail=f"Action locked: Repository is currently in '{repo['index_status']}' status."
+        )
+
+    installation_id = repo["github_install_id"]
+    if not installation_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Repository verification halted: No GitHub App installation context bound.",
+        )
+ 
     try:
         # ── Check cache: if HEAD SHA unchanged, serve cached result instantly ─────
         # Uses GitHubService method — no raw httpx, no _headers() call
@@ -125,6 +118,7 @@ async def run_scout(
                         "scout": cached_json,
                     }
 
+        
         # ── Cache miss — run the scout ─────────────────────────────────────────────
     
         already_indexed = await _get_indexed_repos(db_factory)

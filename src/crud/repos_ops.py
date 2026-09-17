@@ -4,8 +4,18 @@ from typing import Optional
 from src.core.logger import get_logger
 import asyncpg
 from src.services.pre_clone.types import ValidationVerdict, RoutingDecision, ValidationResult
+from src.models.database import RepoStatus
 
 logger = get_logger(__name__)
+
+BLOCKING_STATUSES = {
+    RepoStatus.PENDING.value,
+    RepoStatus.SCOUTING.value,
+    RepoStatus.CLONING.value,
+    RepoStatus.FILTERING.value,
+    RepoStatus.SUBMODULES.value,
+    RepoStatus.MANIFESTING.value,
+}
 
 async def _get_indexed_repos(db_factory) -> dict[str, int]:
     "return the users indexed repos "
